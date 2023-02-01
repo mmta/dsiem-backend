@@ -57,7 +57,6 @@ pub async fn start_worker(
             }
         } else {
             error!("an event contain bytes that cant be parsed, skipping it");
-            continue;
         }
     }
 

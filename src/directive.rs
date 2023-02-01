@@ -6,11 +6,11 @@ use glob::glob;
 use tracing::info;
 use anyhow::{ Result, anyhow };
 
-use crate::{ rule::{ self, RuleType }, utils::{ self, ref_to_digit } };
+use crate::{ rule::{ self, RuleType }, utils::{ self, ref_to_digit }, backlog::Backlog };
 
 const DIRECTIVES_GLOB: &str = "directives_*.json";
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize)]
 pub struct Directive {
     pub id: u64,
     pub name: String,
@@ -25,6 +25,7 @@ pub struct Directive {
     #[serde(rename(deserialize = "sticky_different"))]
     #[serde(default)]
     pub sticky_diffs: rule::StickyDiffData,
+    pub backlogs: Vec<Backlog>,
 }
 
 #[derive(Deserialize)]
@@ -158,7 +159,7 @@ fn validate_reference(r: String, highest_stage: u8) -> Result<(), String> {
         return Err(r + " is not a valid reference");
     }
 
-    if let Ok(n) = ref_to_digit(r.to_string()) {
+    if let Ok(n) = ref_to_digit(&r) {
         if n > highest_stage {
             return Err(r + " is not a valid reference");
         }

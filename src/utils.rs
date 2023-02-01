@@ -1,4 +1,5 @@
 use std::{ env, path::PathBuf };
+use nanoid::nanoid;
 
 fn get_dir(test_env: bool) -> Result<PathBuf, std::io::Error> {
     let dir = if test_env {
@@ -25,7 +26,7 @@ pub fn log_dir() -> Result<PathBuf, std::io::Error> {
 }
 */
 
-pub fn ref_to_digit(v: String) -> Result<u8, String> {
+pub fn ref_to_digit(v: &String) -> Result<u8, String> {
     if !v.starts_with(':') {
         return Err("doesn't begin with :".to_string());
     }
@@ -34,4 +35,8 @@ pub fn ref_to_digit(v: String) -> Result<u8, String> {
         .parse::<u8>()
         .map_err(|e| e.to_string())?;
     Ok(n)
+}
+
+pub fn generate_id() -> String {
+    nanoid!(9)
 }

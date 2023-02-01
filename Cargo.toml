@@ -27,6 +27,7 @@ async-nats = "0.27.0"
 reqwest = "0.11.14"
 anyhow = "1.0.68"
 futures = "0.3.26"
+nanoid = "0.4.0"
 
 [dependencies.clap]
 version = "4.1.4"

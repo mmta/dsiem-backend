@@ -10,6 +10,7 @@ mod utils;
 mod event;
 mod asset;
 mod worker;
+mod manager;
 mod backlog;
 
 #[derive(Parser)]
@@ -148,7 +149,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     let assets = asset::NetworkAssets
         ::new(test_env)
         .map_err(|e| log_startup_err("loading assets", e))?;
-    let manager = backlog::Manager
+    let manager = manager::Manager
         ::new(test_env, directives, assets, sargs.hold_duration, bp_tx, event_tx_clone)
         .map_err(|e| log_startup_err("loading manager", e))?;
     let t = tokio::spawn(async move { manager.listen().await });

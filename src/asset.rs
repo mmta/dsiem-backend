@@ -56,7 +56,7 @@ impl NetworkAssets {
         }
         Ok(result)
     }
-    pub fn is_in_homenet(self, ip: IpAddr) -> bool {
+    pub fn is_in_homenet(&self, ip: IpAddr) -> bool {
         for net in &self.home_net {
             if net.contains(&ip) {
                 return true;
@@ -64,16 +64,17 @@ impl NetworkAssets {
         }
         return false;
     }
-    pub fn is_whitelisted(self, ip: IpAddr) -> bool {
-        for net in self.whitelist {
+    pub fn is_whitelisted(&self, ip: IpAddr) -> bool {
+        for net in &self.whitelist {
             if net.contains(&ip) {
                 return true;
             }
         }
         return false;
     }
-    pub fn get_name(self, ip: IpAddr) -> Result<String, String> {
+    pub fn get_name(&self, ip: IpAddr) -> Result<String, String> {
         let asset = self.assets
+            .clone()
             .into_iter()
             .filter(|n| n.cidr.contains(&ip))
             .filter(|n| n.cidr.is_host_address())
@@ -84,17 +85,17 @@ impl NetworkAssets {
         }
         Ok(asset[0].name.clone())
     }
-    pub fn get_value(self, ip: IpAddr) -> u8 {
+    pub fn get_value(&self, ip: IpAddr) -> u8 {
         self.assets
-            .into_iter()
+            .iter()
             .filter(|n| n.cidr.contains(&ip))
             .max_by_key(|x| x.value)
             .map(|x| x.value)
             .unwrap_or_default()
     }
-    pub fn get_asset_networks(self, ip: IpAddr) -> Option<Vec<String>> {
+    pub fn get_asset_networks(&self, ip: IpAddr) -> Option<Vec<String>> {
         let networks = self.home_net
-            .into_iter()
+            .iter()
             .filter(|n| n.contains(&ip) && !n.is_host_address())
             .map(|v| v.to_string())
             .collect::<Vec<String>>();

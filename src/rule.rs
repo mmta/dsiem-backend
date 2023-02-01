@@ -1,5 +1,13 @@
+use std::net::IpAddr;
+
+use async_nats::jetstream::stream::No;
+use cidr::{ IpCidr, Cidr };
 use serde::{ Serializer, Deserializer };
 use serde_derive::{ Deserialize, Serialize };
+use tracing::warn;
+
+use crate::{ event::NormalizedEvent, asset::{ self, NetworkAssets } };
+use anyhow::{ Result, Context };
 
 #[derive(PartialEq, Clone)]
 pub enum RuleType {
@@ -96,9 +104,467 @@ pub struct DirectiveRule {
 fn is_zero(num: &u64) -> bool {
     *num == 0
 }
+impl Default for DirectiveRule {
+    fn default() -> Self {
+        DirectiveRule {
+            name: "".to_string(),
+            stage: 1,
+            plugin_id: 0,
+            plugin_sid: vec![],
+            product: vec![],
+            category: "".to_string(),
+            subcategory: vec![],
+            occurrence: 0,
+            from: "".to_string(),
+            to: "".to_string(),
+            rule_type: RuleType::UnsupportedType,
+            port_from: "".to_string(),
+            port_to: "".to_string(),
+            protocol: "".to_string(),
+            reliability: 0,
+            timeout: 0,
+            start_time: 0,
+            end_time: 0,
+            rcvd_time: 0,
+            status: "".to_string(),
+            events: vec![],
+            sticky_different: "".to_string(),
+            custom_data1: "".to_string(),
+            custom_label1: "".to_string(),
+            custom_data2: "".to_string(),
+            custom_label2: "".to_string(),
+            custom_data3: "".to_string(),
+            custom_label3: "".to_string(),
+        }
+    }
+}
+
+impl DirectiveRule {
+    pub fn does_event_match(
+        &mut self,
+        a: &NetworkAssets,
+        s: &mut StickyDiffData,
+        e: &NormalizedEvent
+    ) -> bool {
+        if self.rule_type == RuleType::PluginRule {
+            plugin_rule_check(self, a, s, e)
+        } else if self.rule_type == RuleType::TaxonomyRule {
+            taxonomy_rule_check(self, a, s, e)
+        } else {
+            false
+        }
+    }
+}
+
+fn plugin_rule_check(
+    r: &DirectiveRule,
+    a: &NetworkAssets,
+    s: &mut StickyDiffData,
+    e: &NormalizedEvent
+) -> bool {
+    if e.plugin_id != r.plugin_id {
+        return false;
+    }
+    let mut sid_match = false;
+    for v in r.plugin_sid.iter() {
+        if *v == e.plugin_sid {
+            sid_match = true;
+            break;
+        }
+    }
+    if !sid_match {
+        return false;
+    }
+    if r.sticky_different == "PLUGIN_SID" {
+        _ = is_int_stickydiff(e.plugin_sid, s);
+    }
+    ip_port_check(r, a, e, s) && custom_data_check(r, s, e)
+}
+
+fn taxonomy_rule_check(
+    r: &DirectiveRule,
+    a: &NetworkAssets,
+    s: &mut StickyDiffData,
+    e: &NormalizedEvent
+) -> bool {
+    if r.category != e.category {
+        return false;
+    }
+    let mut product_match = false;
+    for v in r.product.iter() {
+        if *v == e.product {
+            product_match = true;
+            break;
+        }
+    }
+    if !product_match {
+        return false;
+    }
+    // subcategory is optional and can use "ANY"
+    if !r.subcategory.is_empty() {
+        let mut sc_match = false;
+        for v in r.subcategory.iter() {
+            if *v == e.subcategory || *v == "ANY" {
+                sc_match = true;
+                break;
+            }
+        }
+        if !sc_match {
+            return false;
+        }
+    }
+    ip_port_check(r, a, e, s)
+}
+
+fn custom_data_check(r: &DirectiveRule, s: &mut StickyDiffData, e: &NormalizedEvent) -> bool {
+    let r1 = if !r.custom_data1.is_empty() && r.custom_data1 != "ANY" {
+        match_text_case_insensitive(&r.custom_data1, &e.custom_data1) ||
+            is_string_match_csvrule(&r.custom_data1, &e.custom_data1)
+    } else {
+        true
+    };
+    let r2 = if !r.custom_data2.is_empty() && r.custom_data2 != "ANY" {
+        match_text_case_insensitive(&r.custom_data2, &e.custom_data2) ||
+            is_string_match_csvrule(&r.custom_data2, &e.custom_data2)
+    } else {
+        true
+    };
+    let r3 = if !r.custom_data3.is_empty() && r.custom_data3 != "ANY" {
+        match_text_case_insensitive(&r.custom_data3, &e.custom_data3) ||
+            is_string_match_csvrule(&r.custom_data3, &e.custom_data3)
+    } else {
+        true
+    };
+
+    match r.sticky_different.as_str() {
+        "CUSTOM_DATA1" => {
+            _ = is_string_stickydiff(&e.custom_data1, s);
+        }
+        "CUSTOM_DATA2" => {
+            _ = is_string_stickydiff(&e.custom_data2, s);
+        }
+        "CUSTOM_DATA3" => {
+            _ = is_string_stickydiff(&e.custom_data3, s);
+        }
+        &_ => {}
+    }
+
+    r1 && r2 && r3
+}
+
+fn ip_port_check(
+    r: &DirectiveRule,
+    a: &NetworkAssets,
+    e: &NormalizedEvent,
+    s: &mut StickyDiffData
+) -> bool {
+    let in_homenet = a.is_in_homenet(e.src_ip);
+    if r.from == "HOME_NET" && !in_homenet {
+        return false;
+    }
+    if r.from == "!HOME_NET" && in_homenet {
+        return false;
+    }
+    // covers  r.From == "IP", r.From == "IP1, IP2, !IP3", r.From == CIDR-netaddr, r.From == "CIDR1, CIDR2, !CIDR3"
+    if
+        r.from != "HOME_NET" &&
+        r.from != "!HOME_NET" &&
+        r.from != "ANY" &&
+        !is_ip_match_csvrule(&r.from, e.src_ip)
+    {
+        return false;
+    }
+    if r.from != "ANY" && !is_string_match_csvrule(&r.port_from, &e.src_port.to_string()) {
+        return false;
+    }
+    if r.to != "ANY" && !is_string_match_csvrule(&r.port_to, &e.dst_port.to_string()) {
+        return false;
+    }
+
+    match r.sticky_different.as_str() {
+        "SRC_IP" => {
+            _ = is_string_stickydiff(&e.src_ip.to_string(), s);
+        }
+        "DST_IP" => {
+            _ = is_string_stickydiff(&e.dst_ip.to_string(), s);
+        }
+        "SRC_PORT" => {
+            _ = is_int_stickydiff(e.src_port.into(), s);
+        }
+        "DST_PORT" => {
+            _ = is_int_stickydiff(e.dst_port.into(), s);
+        }
+        &_ => {}
+    }
+
+    true
+}
+
+fn match_text_case_insensitive(rule_string: &str, term: &str) -> bool {
+    let mut rule_string = rule_string.to_string();
+    let is_inverse = rule_string.starts_with('!');
+    if is_inverse {
+        rule_string.remove(0);
+    }
+    let m = rule_string.to_lowercase() == term.to_lowercase();
+    if is_inverse {
+        return !m;
+    }
+    m
+    // m ^ is_inverse
+}
+fn is_string_match_csvrule(rules_in_csv: &str, term: &String) -> bool {
+    let mut result = false;
+    let rules: Vec<String> = rules_in_csv
+        .split(',')
+        .map(|s| s.to_string())
+        .collect();
+    for mut v in rules {
+        let is_inverse = v.starts_with('!');
+        if is_inverse {
+            v = v.replace('!', "");
+        }
+        let term_is_equal = v == *term;
+
+        /*
+            The correct logic here is to AND all inverse rules,
+            and then OR the result with all the non-inverse rules.
+            The following code implement that with shortcuts.
+        */
+
+        // break early if !condition is violated
+        if is_inverse && term_is_equal {
+            result = false;
+            break;
+        }
+        // break early if condition is fulfilled
+        if !is_inverse && term_is_equal {
+            result = true;
+            break;
+        }
+
+        // if !condition is fulfilled, continue evaluation of next in item
+        if is_inverse && !term_is_equal {
+            result = true;
+        }
+        // !isInverse && !termIsEqual should result in match = false (default)
+        // so there's no need to handle it
+    }
+    result
+}
+
+fn is_ip_match_csvrule(rules_in_csv: &str, ip: IpAddr) -> bool {
+    let mut result = false;
+    let rules: Vec<String> = rules_in_csv
+        .split(',')
+        .map(|s| s.to_string())
+        .collect();
+    for mut v in rules {
+        let is_inverse = v.starts_with('!');
+        if is_inverse {
+            v = v.replace('!', "");
+        }
+        if !v.contains('/') {
+            v += "/32";
+        }
+        let res = v.parse();
+        if res.is_err() {
+            warn!("cannot parse CIDR {}, make sure the directive is configured correctly", v);
+        }
+        let ipnet_a: IpCidr = res.unwrap();
+        let term_is_equal = ipnet_a.contains(&ip);
+
+        /*
+			The correct logic here is to AND all inverse rules,
+			and then OR the result with all the non-inverse rules.
+			The following code implement that with shortcuts.
+		*/
+
+        // break early if !condition is violated
+        if is_inverse && term_is_equal {
+            result = false;
+            break;
+        }
+        // break early if condition is fulfilled
+        if !is_inverse && term_is_equal {
+            result = true;
+            break;
+        }
+
+        // if !condition is fulfilled, continue evaluation of next in item
+        if is_inverse && !term_is_equal {
+            result = true;
+        }
+        // !isInverse && !termIsEqual should result in match = false (default)
+        // so there's no need to handle it
+    }
+    result
+}
 
 #[derive(Deserialize, Default, Clone)]
 pub struct StickyDiffData {
     pub sdiff_string: Vec<String>,
     pub sdiff_int: Vec<u64>,
+}
+
+// isIntStickyDiff check if v fulfill stickydiff condition
+// ret code isn't used right now because the check is done in backlog
+fn is_int_stickydiff(v: u64, r: &mut StickyDiffData) -> bool {
+    for n in r.sdiff_int.iter() {
+        if *n == v {
+            return false;
+        }
+    }
+    r.sdiff_int.push(v); // add it to the collection
+    true
+}
+
+// isStringStickyDiff check if v fulfill stickydiff condition
+// ret code isn't used right now because the check is done in backlog
+fn is_string_stickydiff(v: &str, r: &mut StickyDiffData) -> bool {
+    for s in r.sdiff_string.iter() {
+        if *s == v {
+            return false;
+        }
+    }
+    r.sdiff_string.push(v.to_string());
+    true
+}
+
+#[derive(Clone)]
+pub struct SIDPair {
+    plugin_id: u64,
+    plugin_sid: Vec<u64>,
+}
+#[derive(Clone)]
+pub struct TaxoPair {
+    product: Vec<String>,
+    category: String,
+}
+
+// GetQuickCheckPairs returns SIDPairs and TaxoPairs for a given set of directive rules
+pub fn get_quick_check_pairs(rules: &Vec<DirectiveRule>) -> (Vec<SIDPair>, Vec<TaxoPair>) {
+    let mut sid_pairs = vec![];
+    let mut taxo_pairs = vec![];
+    for r in rules {
+        if r.plugin_id != 0 && !r.plugin_sid.is_empty() {
+            sid_pairs.push(SIDPair {
+                plugin_id: r.plugin_id,
+                plugin_sid: r.plugin_sid.clone(),
+            });
+        }
+        if !r.product.is_empty() && !r.category.is_empty() {
+            taxo_pairs.push(TaxoPair {
+                product: r.product.clone(),
+                category: r.category.clone(),
+            });
+        }
+    }
+    (sid_pairs, taxo_pairs)
+}
+
+// QuickCheckTaxoRule checks event against the key fields in a directive taxonomy rules
+pub fn quick_check_taxo_rule(pairs: &Vec<TaxoPair>, e: &NormalizedEvent) -> bool {
+    let last = pairs
+        .into_iter()
+        .filter(|v| {
+            let v = v.product
+                .clone()
+                .into_iter()
+                .filter(|x| *x == e.product)
+                .last();
+            v.is_some()
+        })
+        .filter(|v| { v.category == e.category })
+        .last();
+    last.is_some()
+}
+
+// QuickCheckPluginRule checks event against the key fields in a directive plugin rules
+pub fn quick_check_plugin_rule(pairs: &Vec<SIDPair>, e: &NormalizedEvent) -> bool {
+    let last = pairs
+        .into_iter()
+        .filter(|v| v.plugin_id == e.plugin_id)
+        .filter(|v| {
+            let v = v.plugin_sid
+                .clone()
+                .into_iter()
+                .filter(|x| *x == e.plugin_sid)
+                .last();
+            v.is_some()
+        })
+        .last();
+    last.is_some()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_get_quick_check_pairs() {
+        let r1 = DirectiveRule {
+            plugin_id: 1,
+            plugin_sid: vec![1, 2, 3],
+            ..Default::default()
+        };
+
+        let r2 = DirectiveRule {
+            product: vec!["checkpoint".to_string()],
+            category: "firewall".to_string(),
+            ..Default::default()
+        };
+        let rules = vec![r1.clone(), r2];
+        let (p, q) = get_quick_check_pairs(&rules);
+        assert!(!p.is_empty());
+        assert!(!q.is_empty());
+        let (_, q) = get_quick_check_pairs(&vec![r1]);
+        assert!(q.is_empty())
+    }
+    #[test]
+    fn test_quick_check_plugin_rule() {
+        let pair = vec![
+            SIDPair {
+                plugin_id: 1,
+                plugin_sid: vec![1, 2, 3],
+            },
+            SIDPair {
+                plugin_id: 2,
+                plugin_sid: vec![1, 2, 3],
+            }
+        ];
+        let mut event = NormalizedEvent {
+            plugin_id: 1,
+            plugin_sid: 1,
+            ..Default::default()
+        };
+        assert!(quick_check_plugin_rule(&pair, &event));
+        event.plugin_sid = 4;
+        assert!(!quick_check_plugin_rule(&pair, &event));
+        event.plugin_id = 3;
+        assert!(!quick_check_plugin_rule(&pair, &event))
+    }
+    #[test]
+    fn test_quick_check_taxo_rule() {
+        let pair = vec![
+            TaxoPair {
+                category: "firewall".to_owned(),
+                product: vec!["checkpoint".to_owned(), "fortigate".to_owned()],
+            },
+            TaxoPair {
+                category: "waf".to_owned(),
+                product: vec!["f5".to_owned(), "modsec".to_owned()],
+            }
+        ];
+        let mut event = NormalizedEvent {
+            product: "checkpoint".to_string(),
+            category: "firewall".to_string(),
+            ..Default::default()
+        };
+        assert!(quick_check_taxo_rule(&pair, &event));
+        event.category = "waf".to_string();
+        assert!(!quick_check_taxo_rule(&pair, &event));
+        event.product = "pf".to_string();
+        assert!(!quick_check_taxo_rule(&pair, &event))
+    }
 }
