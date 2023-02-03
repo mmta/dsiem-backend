@@ -21,8 +21,8 @@ mod backlog;
     version,
     about = "Dsiem backend server",
     long_about = "Dsiem backend server\n\n\
-    DSiem is an event correlation engine for ELK stack.\n\
-    DSiem provides OSSIM-style correlation for normalized logs/events, and relies on\n\
+    Dsiem is an event correlation engine for ELK stack.\n\
+    Dsiem provides OSSIM-style correlation for normalized logs/events, and relies on\n\
     Filebeat, Logstash, and Elasticsearch to do the rest."
 )]
 struct Cli {

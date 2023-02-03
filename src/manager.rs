@@ -85,11 +85,24 @@ impl Manager {
                     }
 
                     let mut match_found = false;
+                    debug!(directive.id, "total backlogs {}", backlogs.len());
                     for locked in backlogs.iter() {
                         let b = locked.read().await;
-                        let i = usize::try_from(b.current_stage - 1).unwrap_or_default();
-                        // we just want to check if there's match, so not passing mutable sticky_diffdata
-                        if b.rules[i].does_event_match(&assets, &event, false).await {
+                        let res = b.current_rule();
+                        if res.is_err() {
+                            error!(directive.id, b.id, "{}", res.unwrap_err());
+                            continue;
+                        }
+                        {
+                            let r = b.current_stage.read();
+                            debug!(
+                                directive.id,
+                                b.id,
+                                stage = *r,
+                                "about to check existing backlog"
+                            );
+                        }
+                        if res.unwrap().does_event_match(&assets, &event, false) {
                             match_found = true;
                             break;
                         }
@@ -99,14 +112,10 @@ impl Manager {
                         debug!(directive.id, event.id, "found existing backlog");
                     } else {
                         // new backlog
-                        debug!(directive.id, event.id, "created new backlog");
+                        debug!(directive.id, event.id, "creating new backlog");
                         let res = backlog::Backlog::new(&directive, assets.clone(), &event).await;
                         if res.is_err() {
-                            error!(
-                                directive.id,
-                                "cannot create backlog: {}",
-                                res.unwrap_err().to_string()
-                            );
+                            error!(directive.id, "cannot create backlog: {}", res.unwrap_err());
                         } else if let Ok(b) = res {
                             let locked = Arc::new(RwLock::new(b));
                             let clone = Arc::clone(&locked);
@@ -114,11 +123,9 @@ impl Manager {
                             let rx = tx.subscribe();
                             let bp_sender = bp_sender.clone();
 
-                            let _detached = task::spawn({
-                                async move {
-                                    let w = clone.read().await;
-                                    w.start(rx, bp_sender, self.max_delay).await;
-                                }
+                            let _detached = task::spawn(async move {
+                                let w = clone.read().await;
+                                w.start(rx, bp_sender, self.max_delay).await
                             });
                         }
                     }

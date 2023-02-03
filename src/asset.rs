@@ -32,7 +32,6 @@ pub struct NetworkAssets {
 impl NetworkAssets {
     pub fn new(test_env: bool) -> Result<NetworkAssets> {
         let cfg_dir = utils::config_dir(test_env)?;
-        // println!("using config dir {}", cfg_dir.to_string_lossy());
         let glob_pattern = cfg_dir.to_string_lossy().to_string() + "/" + ASSETS_GLOB;
         let mut result = NetworkAssets { assets: vec![], whitelist: vec![], home_net: vec![] };
         for file_path in glob(&glob_pattern)?.flatten() {
@@ -58,7 +57,7 @@ impl NetworkAssets {
     }
     pub fn is_in_homenet(&self, ip: &IpAddr) -> bool {
         for net in &self.home_net {
-            if net.contains(&ip) {
+            if net.contains(ip) {
                 return true;
             }
         }
@@ -66,7 +65,7 @@ impl NetworkAssets {
     }
     pub fn is_whitelisted(&self, ip: &IpAddr) -> bool {
         for net in &self.whitelist {
-            if net.contains(&ip) {
+            if net.contains(ip) {
                 return true;
             }
         }

@@ -3,7 +3,7 @@ use std::{ net::IpAddr, sync::Arc, collections::HashSet };
 use cidr::IpCidr;
 use serde::{ Serializer, Deserializer };
 use serde_derive::{ Deserialize, Serialize };
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 use tracing::warn;
 
 use crate::{ event::NormalizedEvent, asset::NetworkAssets };
@@ -52,7 +52,7 @@ pub struct DirectiveRule {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
     pub subcategory: Vec<String>,
-    pub occurrence: u64,
+    pub occurrence: usize,
     pub from: String,
     pub to: String,
     #[serde(rename(deserialize = "type"))]
@@ -62,18 +62,15 @@ pub struct DirectiveRule {
     pub protocol: String,
     pub reliability: u8,
     pub timeout: u64,
-    #[serde(skip_serializing_if = "is_zero_or_less")]
+    #[serde(skip_serializing_if = "is_locked_zero_or_less")]
     #[serde(default)]
-    pub start_time: i64,
-    #[serde(skip_serializing_if = "is_zero_or_less")]
+    pub start_time: Arc<RwLock<i64>>,
+    #[serde(skip_serializing_if = "is_locked_zero_or_less")]
     #[serde(default)]
-    pub end_time: i64,
-    #[serde(skip_serializing_if = "is_zero_or_less")]
+    pub end_time: Arc<RwLock<i64>>,
+    #[serde(skip_serializing_if = "is_locked_string_empty")]
     #[serde(default)]
-    pub rcvd_time: i64,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    #[serde(default)]
-    pub status: String,
+    pub status: Arc<RwLock<String>>,
     #[serde(skip_serializing_if = "String::is_empty")]
     #[serde(default)]
     pub sticky_different: String,
@@ -101,11 +98,17 @@ pub struct DirectiveRule {
     pub event_ids: Arc<RwLock<HashSet<String>>>,
 }
 
-/// This is only used for serialize
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_zero_or_less(num: &i64) -> bool {
-    *num <= 0
+// This is only used for serialize
+fn is_locked_zero_or_less(num: &Arc<RwLock<i64>>) -> bool {
+    let r = num.read();
+    *r <= 0
 }
+// This is only used for serialize
+fn is_locked_string_empty(s: &Arc<RwLock<String>>) -> bool {
+    let r = s.read();
+    r.is_empty()
+}
+
 impl Default for DirectiveRule {
     fn default() -> Self {
         DirectiveRule {
@@ -125,10 +128,9 @@ impl Default for DirectiveRule {
             protocol: "".to_string(),
             reliability: 0,
             timeout: 0,
-            start_time: 0,
-            end_time: 0,
-            rcvd_time: 0,
-            status: "".to_string(),
+            start_time: Arc::new(RwLock::new(0)),
+            end_time: Arc::new(RwLock::new(0)),
+            status: Arc::new(RwLock::new("".to_string())),
             sticky_different: "".to_string(),
             custom_data1: "".to_string(),
             custom_label1: "".to_string(),
@@ -143,23 +145,23 @@ impl Default for DirectiveRule {
 }
 
 impl DirectiveRule {
-    pub async fn does_event_match(
+    pub fn does_event_match(
         &self,
         a: &NetworkAssets,
         e: &NormalizedEvent,
         mut_sdiff: bool
     ) -> bool {
         if self.rule_type == RuleType::PluginRule {
-            plugin_rule_check(self, a, e, mut_sdiff).await
+            plugin_rule_check(self, a, e, mut_sdiff)
         } else if self.rule_type == RuleType::TaxonomyRule {
-            taxonomy_rule_check(self, a, e, mut_sdiff).await
+            taxonomy_rule_check(self, a, e, mut_sdiff)
         } else {
             false
         }
     }
 }
 
-async fn plugin_rule_check(
+fn plugin_rule_check(
     r: &DirectiveRule,
     a: &NetworkAssets,
     e: &NormalizedEvent,
@@ -181,10 +183,10 @@ async fn plugin_rule_check(
     if r.sticky_different == "PLUGIN_SID" {
         _ = is_int_stickydiff(e.plugin_sid, &r.sticky_diffdata, mut_sdiff);
     }
-    ip_port_check(r, a, e, mut_sdiff).await && custom_data_check(r, e, mut_sdiff).await
+    ip_port_check(r, a, e, mut_sdiff) && custom_data_check(r, e, mut_sdiff)
 }
 
-async fn taxonomy_rule_check(
+fn taxonomy_rule_check(
     r: &DirectiveRule,
     a: &NetworkAssets,
     e: &NormalizedEvent,
@@ -216,10 +218,10 @@ async fn taxonomy_rule_check(
             return false;
         }
     }
-    ip_port_check(r, a, e, mut_sdiff).await
+    ip_port_check(r, a, e, mut_sdiff)
 }
 
-async fn custom_data_check(r: &DirectiveRule, e: &NormalizedEvent, mut_sdiff: bool) -> bool {
+fn custom_data_check(r: &DirectiveRule, e: &NormalizedEvent, mut_sdiff: bool) -> bool {
     let r1 = if !r.custom_data1.is_empty() && r.custom_data1 != "ANY" {
         match_text_case_insensitive(&r.custom_data1, &e.custom_data1) ||
             is_string_match_csvrule(&r.custom_data1, &e.custom_data1)
@@ -241,13 +243,13 @@ async fn custom_data_check(r: &DirectiveRule, e: &NormalizedEvent, mut_sdiff: bo
 
     match r.sticky_different.as_str() {
         "CUSTOM_DATA1" => {
-            _ = is_string_stickydiff(&e.custom_data1, &r.sticky_diffdata, mut_sdiff).await;
+            _ = is_string_stickydiff(&e.custom_data1, &r.sticky_diffdata, mut_sdiff);
         }
         "CUSTOM_DATA2" => {
-            _ = is_string_stickydiff(&e.custom_data2, &r.sticky_diffdata, mut_sdiff).await;
+            _ = is_string_stickydiff(&e.custom_data2, &r.sticky_diffdata, mut_sdiff);
         }
         "CUSTOM_DATA3" => {
-            _ = is_string_stickydiff(&e.custom_data3, &r.sticky_diffdata, mut_sdiff).await;
+            _ = is_string_stickydiff(&e.custom_data3, &r.sticky_diffdata, mut_sdiff);
         }
         &_ => {}
     }
@@ -255,7 +257,7 @@ async fn custom_data_check(r: &DirectiveRule, e: &NormalizedEvent, mut_sdiff: bo
     r1 && r2 && r3
 }
 
-async fn ip_port_check(
+fn ip_port_check(
     r: &DirectiveRule,
     a: &NetworkAssets,
     e: &NormalizedEvent,
@@ -286,16 +288,16 @@ async fn ip_port_check(
 
     match r.sticky_different.as_str() {
         "SRC_IP" => {
-            _ = is_string_stickydiff(&e.src_ip.to_string(), &r.sticky_diffdata, mut_sdiff).await;
+            _ = is_string_stickydiff(&e.src_ip.to_string(), &r.sticky_diffdata, mut_sdiff);
         }
         "DST_IP" => {
-            _ = is_string_stickydiff(&e.dst_ip.to_string(), &r.sticky_diffdata, mut_sdiff).await;
+            _ = is_string_stickydiff(&e.dst_ip.to_string(), &r.sticky_diffdata, mut_sdiff);
         }
         "SRC_PORT" => {
-            _ = is_int_stickydiff(e.src_port.into(), &r.sticky_diffdata, mut_sdiff).await;
+            _ = is_int_stickydiff(e.src_port.into(), &r.sticky_diffdata, mut_sdiff);
         }
         "DST_PORT" => {
-            _ = is_int_stickydiff(e.dst_port.into(), &r.sticky_diffdata, mut_sdiff).await;
+            _ = is_int_stickydiff(e.dst_port.into(), &r.sticky_diffdata, mut_sdiff);
         }
         &_ => {}
     }
@@ -411,34 +413,30 @@ pub struct StickyDiffData {
 }
 
 // is_int_stickydiff checks if v fulfill stickydiff condition
-async fn is_int_stickydiff(v: u64, s: &Arc<RwLock<StickyDiffData>>, add_new: bool) -> Result<bool> {
-    let r_guard = s.read().await;
+fn is_int_stickydiff(v: u64, s: &Arc<RwLock<StickyDiffData>>, add_new: bool) -> Result<bool> {
+    let r_guard = s.read();
     for n in r_guard.sdiff_int.iter() {
         if *n == v {
             return Ok(false);
         }
     }
     if add_new {
-        let mut w_guard = s.write().await;
+        let mut w_guard = s.write();
         w_guard.sdiff_int.push(v); // add it to the collection
     }
     Ok(true)
 }
 
 // is_string_stickydiff checks if v fulfill stickydiff condition
-async fn is_string_stickydiff(
-    v: &str,
-    s: &Arc<RwLock<StickyDiffData>>,
-    add_new: bool
-) -> Result<bool> {
-    let r_guard = s.read().await;
+fn is_string_stickydiff(v: &str, s: &Arc<RwLock<StickyDiffData>>, add_new: bool) -> Result<bool> {
+    let r_guard = s.read();
     for s in r_guard.sdiff_string.iter() {
         if *s == v {
             return Ok(false);
         }
     }
     if add_new {
-        let mut w_guard = s.write().await;
+        let mut w_guard = s.write();
         w_guard.sdiff_string.push(v.to_string());
     }
     Ok(true)
