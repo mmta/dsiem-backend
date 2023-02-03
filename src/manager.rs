@@ -1,9 +1,16 @@
-use std::path::PathBuf;
+use std::{ path::PathBuf, sync::Arc };
 
-use tokio::sync::{ mpsc::Sender as MpscSender, broadcast::Sender };
-use tracing::{ info, debug };
+use tokio::{ sync::{ mpsc::Sender as MpscSender, broadcast::{ Sender, self }, RwLock }, task };
+use tracing::{ info, debug, error };
 
-use crate::{ directive::Directive, asset::NetworkAssets, event::NormalizedEvent, utils, rule };
+use crate::{
+    directive::Directive,
+    asset::NetworkAssets,
+    event::NormalizedEvent,
+    utils,
+    rule,
+    backlog::{ self, Backlog },
+};
 
 use anyhow::Result;
 use tokio::task::JoinSet;
@@ -17,6 +24,7 @@ pub struct Manager {
     pub directives: Vec<Directive>,
     pub assets: NetworkAssets,
     pub hold_duration: u8,
+    pub max_delay: i64,
     pub bp_tx: MpscSender<bool>,
     pub publisher: Sender<NormalizedEvent>,
 }
@@ -27,6 +35,7 @@ impl Manager {
         directives: Vec<Directive>,
         assets: NetworkAssets,
         hold_duration: u8,
+        max_delay: i64,
         bp_tx: MpscSender<bool>,
         publisher: Sender<NormalizedEvent>
     ) -> Result<Manager> {
@@ -38,6 +47,7 @@ impl Manager {
             directives,
             assets,
             hold_duration,
+            max_delay,
             bp_tx,
             publisher,
         };
@@ -47,34 +57,80 @@ impl Manager {
         info!("backlog manager started");
         // copy this channel to all directive managers
         let mut set = JoinSet::new();
-        for d in self.directives {
-            let mut rx = self.publisher.subscribe();
-            debug!("listening for directive {}", d.id);
+        for directive in self.directives {
+            let assets = self.assets.clone();
+            let sender = self.publisher.clone();
+            let bp_sender = self.bp_tx.clone();
+
+            if directive.id == 1 || directive.id == 2 {
+                continue;
+            }
             set.spawn(async move {
-                let (sid_pairs, taxo_pairs) = rule::get_quick_check_pairs(&d.rules);
-                let contains_pluginrule = sid_pairs.is_empty();
-                let contains_taxorule = taxo_pairs.is_empty();
-
-                while let Ok(evt) = rx.recv().await {
-                    debug!("directive {} received evt: {}", d.id, evt.event_id);
-                    if contains_pluginrule && !rule::quick_check_plugin_rule(&sid_pairs, &evt) {
+                let (sid_pairs, taxo_pairs) = rule::get_quick_check_pairs(&directive.rules);
+                let contains_pluginrule = !sid_pairs.is_empty();
+                let contains_taxorule = !taxo_pairs.is_empty();
+                let mut backlogs: Vec<Arc<RwLock<Backlog>>> = vec![];
+                let mut upstream = sender.subscribe();
+                let (tx, _) = broadcast::channel(128);
+                debug!(directive.id, "listening for event");
+                while let Ok(event) = upstream.recv().await {
+                    debug!(directive.id, event.id, "received event");
+                    if
+                        (contains_pluginrule &&
+                            !rule::quick_check_plugin_rule(&sid_pairs, &event)) ||
+                        (contains_taxorule && !rule::quick_check_taxo_rule(&taxo_pairs, &event))
+                    {
+                        debug!(directive.id, event.id, "failed quick check");
                         continue;
                     }
-                    if contains_taxorule && !rule::quick_check_taxo_rule(&taxo_pairs, &evt) {
-                        continue;
-                    }
-                    let match_found = false;
-                    for b in d.backlogs.iter() {
+
+                    let mut match_found = false;
+                    for locked in backlogs.iter() {
+                        let b = locked.read().await;
+                        let i = usize::try_from(b.current_stage - 1).unwrap_or_default();
+                        // we just want to check if there's match, so not passing mutable sticky_diffdata
+                        if b.rules[i].does_event_match(&assets, &event, false).await {
+                            match_found = true;
+                            break;
+                        }
                     }
 
-                    // proceed to blogs.manager() in go
+                    if match_found {
+                        debug!(directive.id, event.id, "found existing backlog");
+                    } else {
+                        // new backlog
+                        debug!(directive.id, event.id, "created new backlog");
+                        let res = backlog::Backlog::new(&directive, assets.clone(), &event).await;
+                        if res.is_err() {
+                            error!(
+                                directive.id,
+                                "cannot create backlog: {}",
+                                res.unwrap_err().to_string()
+                            );
+                        } else if let Ok(b) = res {
+                            let locked = Arc::new(RwLock::new(b));
+                            let clone = Arc::clone(&locked);
+                            backlogs.push(locked);
+                            let rx = tx.subscribe();
+                            let bp_sender = bp_sender.clone();
 
-                    /* break example
-                    i += 1;
-                    if i == 3 {
-                        break;
+                            let _detached = task::spawn({
+                                async move {
+                                    let w = clone.read().await;
+                                    w.start(rx, bp_sender, self.max_delay).await;
+                                }
+                            });
+                        }
                     }
-                    */
+                    let res = tx.send(event.clone());
+                    if res.is_err() {
+                        error!(
+                            directive.id,
+                            event.id,
+                            "cant send event downstream: {:?}",
+                            res.unwrap_err()
+                        );
+                    }
                 }
             });
         }

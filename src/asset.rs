@@ -20,7 +20,7 @@ pub struct NetworkAsset {
     pub whitelisted: bool,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Default, Debug)]
 pub struct NetworkAssets {
     pub assets: Vec<NetworkAsset>,
     #[serde(skip_deserializing)]
@@ -56,7 +56,7 @@ impl NetworkAssets {
         }
         Ok(result)
     }
-    pub fn is_in_homenet(&self, ip: IpAddr) -> bool {
+    pub fn is_in_homenet(&self, ip: &IpAddr) -> bool {
         for net in &self.home_net {
             if net.contains(&ip) {
                 return true;
@@ -64,7 +64,7 @@ impl NetworkAssets {
         }
         return false;
     }
-    pub fn is_whitelisted(&self, ip: IpAddr) -> bool {
+    pub fn is_whitelisted(&self, ip: &IpAddr) -> bool {
         for net in &self.whitelist {
             if net.contains(&ip) {
                 return true;
@@ -72,7 +72,7 @@ impl NetworkAssets {
         }
         return false;
     }
-    pub fn get_name(&self, ip: IpAddr) -> Result<String, String> {
+    pub fn get_name(&self, ip: &IpAddr) -> Result<String, String> {
         let asset = self.assets
             .clone()
             .into_iter()
@@ -85,7 +85,7 @@ impl NetworkAssets {
         }
         Ok(asset[0].name.clone())
     }
-    pub fn get_value(&self, ip: IpAddr) -> u8 {
+    pub fn get_value(&self, ip: &IpAddr) -> u8 {
         self.assets
             .iter()
             .filter(|n| n.cidr.contains(&ip))
@@ -93,7 +93,7 @@ impl NetworkAssets {
             .map(|x| x.value)
             .unwrap_or_default()
     }
-    pub fn get_asset_networks(&self, ip: IpAddr) -> Option<Vec<String>> {
+    pub fn get_asset_networks(&self, ip: &IpAddr) -> Option<Vec<String>> {
         let networks = self.home_net
             .iter()
             .filter(|n| n.contains(&ip) && !n.is_host_address())
@@ -129,21 +129,21 @@ mod test {
         assert_eq!(assets.unwrap_err().to_string(), "cannot load any asset");
         let assets = NetworkAssets::new(true).unwrap();
         let ip1: IpAddr = "192.168.0.1".parse().unwrap();
-        let name = assets.clone().get_name(ip1).unwrap();
+        let name = assets.get_name(&ip1).unwrap();
         assert_eq!(name, "Firewall".to_string());
-        let networks = assets.clone().get_asset_networks(ip1).unwrap();
+        let networks = assets.get_asset_networks(&ip1).unwrap();
         assert_eq!(networks, vec!["192.168.0.0/16"]);
-        assert!(assets.clone().is_in_homenet(ip1));
+        assert!(assets.is_in_homenet(&ip1));
         let ip2: IpAddr = "192.168.0.2".parse().unwrap();
-        assert!(assets.clone().is_whitelisted(ip2));
-        assert_eq!(assets.clone().get_value(ip1), 5);
+        assert!(assets.is_whitelisted(&ip2));
+        assert_eq!(assets.get_value(&ip1), 5);
         let ip3: IpAddr = "8.8.8.8".parse().unwrap();
-        let name = assets.clone().get_name(ip3);
-        let networks = assets.clone().get_asset_networks(ip3);
+        let name = assets.get_name(&ip3);
+        let networks = assets.get_asset_networks(&ip3);
         assert!(networks.is_none());
         assert_eq!(name.unwrap_err(), "cannot get the asset name for 8.8.8.8");
-        assert!(!assets.clone().is_in_homenet(ip3));
-        assert!(!assets.is_whitelisted(ip3));
+        assert!(!assets.is_in_homenet(&ip3));
+        assert!(!assets.is_whitelisted(&ip3));
 
         let mut a = NetworkAsset {
             cidr: IpCidr::from_str("192.168.0.1/32").unwrap(),

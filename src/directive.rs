@@ -6,7 +6,7 @@ use glob::glob;
 use tracing::info;
 use anyhow::{ Result, anyhow };
 
-use crate::{ rule::{ self, RuleType }, utils::{ self, ref_to_digit }, backlog::Backlog };
+use crate::{ rule::{ self, RuleType }, utils::{ self, ref_to_digit } };
 
 const DIRECTIVES_GLOB: &str = "directives_*.json";
 
@@ -25,7 +25,6 @@ pub struct Directive {
     #[serde(rename(deserialize = "sticky_different"))]
     #[serde(default)]
     pub sticky_diffs: rule::StickyDiffData,
-    pub backlogs: Vec<Backlog>,
 }
 
 #[derive(Deserialize)]

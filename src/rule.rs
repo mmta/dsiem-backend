@@ -1,15 +1,15 @@
-use std::net::IpAddr;
+use std::{ net::IpAddr, sync::Arc, collections::HashSet };
 
-use async_nats::jetstream::stream::No;
-use cidr::{ IpCidr, Cidr };
+use cidr::IpCidr;
 use serde::{ Serializer, Deserializer };
 use serde_derive::{ Deserialize, Serialize };
+use tokio::sync::RwLock;
 use tracing::warn;
 
-use crate::{ event::NormalizedEvent, asset::{ self, NetworkAssets } };
-use anyhow::{ Result, Context };
+use crate::{ event::NormalizedEvent, asset::NetworkAssets };
+use anyhow::Result;
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum RuleType {
     PluginRule,
     TaxonomyRule,
@@ -37,7 +37,7 @@ impl<'de> serde::Deserialize<'de> for RuleType {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct DirectiveRule {
     pub name: String,
     pub stage: u8,
@@ -62,20 +62,18 @@ pub struct DirectiveRule {
     pub protocol: String,
     pub reliability: u8,
     pub timeout: u64,
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(skip_serializing_if = "is_zero_or_less")]
     #[serde(default)]
-    pub start_time: u64,
-    #[serde(skip_serializing_if = "is_zero")]
+    pub start_time: i64,
+    #[serde(skip_serializing_if = "is_zero_or_less")]
     #[serde(default)]
-    pub end_time: u64,
-    #[serde(skip_serializing_if = "is_zero")]
+    pub end_time: i64,
+    #[serde(skip_serializing_if = "is_zero_or_less")]
     #[serde(default)]
-    pub rcvd_time: u64,
+    pub rcvd_time: i64,
     #[serde(skip_serializing_if = "String::is_empty")]
     #[serde(default)]
     pub status: String,
-    #[serde(default)]
-    pub events: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     #[serde(default)]
     pub sticky_different: String,
@@ -97,12 +95,16 @@ pub struct DirectiveRule {
     #[serde(skip_serializing_if = "String::is_empty")]
     #[serde(default)]
     pub custom_label3: String,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub sticky_diffdata: Arc<RwLock<StickyDiffData>>,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub event_ids: Arc<RwLock<HashSet<String>>>,
 }
 
 /// This is only used for serialize
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_zero(num: &u64) -> bool {
-    *num == 0
+fn is_zero_or_less(num: &i64) -> bool {
+    *num <= 0
 }
 impl Default for DirectiveRule {
     fn default() -> Self {
@@ -127,7 +129,6 @@ impl Default for DirectiveRule {
             end_time: 0,
             rcvd_time: 0,
             status: "".to_string(),
-            events: vec![],
             sticky_different: "".to_string(),
             custom_data1: "".to_string(),
             custom_label1: "".to_string(),
@@ -135,32 +136,34 @@ impl Default for DirectiveRule {
             custom_label2: "".to_string(),
             custom_data3: "".to_string(),
             custom_label3: "".to_string(),
+            sticky_diffdata: Arc::new(RwLock::new(StickyDiffData::default())),
+            event_ids: Arc::new(RwLock::new(vec![].into_iter().collect())),
         }
     }
 }
 
 impl DirectiveRule {
-    pub fn does_event_match(
-        &mut self,
+    pub async fn does_event_match(
+        &self,
         a: &NetworkAssets,
-        s: &mut StickyDiffData,
-        e: &NormalizedEvent
+        e: &NormalizedEvent,
+        mut_sdiff: bool
     ) -> bool {
         if self.rule_type == RuleType::PluginRule {
-            plugin_rule_check(self, a, s, e)
+            plugin_rule_check(self, a, e, mut_sdiff).await
         } else if self.rule_type == RuleType::TaxonomyRule {
-            taxonomy_rule_check(self, a, s, e)
+            taxonomy_rule_check(self, a, e, mut_sdiff).await
         } else {
             false
         }
     }
 }
 
-fn plugin_rule_check(
+async fn plugin_rule_check(
     r: &DirectiveRule,
     a: &NetworkAssets,
-    s: &mut StickyDiffData,
-    e: &NormalizedEvent
+    e: &NormalizedEvent,
+    mut_sdiff: bool
 ) -> bool {
     if e.plugin_id != r.plugin_id {
         return false;
@@ -176,16 +179,16 @@ fn plugin_rule_check(
         return false;
     }
     if r.sticky_different == "PLUGIN_SID" {
-        _ = is_int_stickydiff(e.plugin_sid, s);
+        _ = is_int_stickydiff(e.plugin_sid, &r.sticky_diffdata, mut_sdiff);
     }
-    ip_port_check(r, a, e, s) && custom_data_check(r, s, e)
+    ip_port_check(r, a, e, mut_sdiff).await && custom_data_check(r, e, mut_sdiff).await
 }
 
-fn taxonomy_rule_check(
+async fn taxonomy_rule_check(
     r: &DirectiveRule,
     a: &NetworkAssets,
-    s: &mut StickyDiffData,
-    e: &NormalizedEvent
+    e: &NormalizedEvent,
+    mut_sdiff: bool
 ) -> bool {
     if r.category != e.category {
         return false;
@@ -213,10 +216,10 @@ fn taxonomy_rule_check(
             return false;
         }
     }
-    ip_port_check(r, a, e, s)
+    ip_port_check(r, a, e, mut_sdiff).await
 }
 
-fn custom_data_check(r: &DirectiveRule, s: &mut StickyDiffData, e: &NormalizedEvent) -> bool {
+async fn custom_data_check(r: &DirectiveRule, e: &NormalizedEvent, mut_sdiff: bool) -> bool {
     let r1 = if !r.custom_data1.is_empty() && r.custom_data1 != "ANY" {
         match_text_case_insensitive(&r.custom_data1, &e.custom_data1) ||
             is_string_match_csvrule(&r.custom_data1, &e.custom_data1)
@@ -238,13 +241,13 @@ fn custom_data_check(r: &DirectiveRule, s: &mut StickyDiffData, e: &NormalizedEv
 
     match r.sticky_different.as_str() {
         "CUSTOM_DATA1" => {
-            _ = is_string_stickydiff(&e.custom_data1, s);
+            _ = is_string_stickydiff(&e.custom_data1, &r.sticky_diffdata, mut_sdiff).await;
         }
         "CUSTOM_DATA2" => {
-            _ = is_string_stickydiff(&e.custom_data2, s);
+            _ = is_string_stickydiff(&e.custom_data2, &r.sticky_diffdata, mut_sdiff).await;
         }
         "CUSTOM_DATA3" => {
-            _ = is_string_stickydiff(&e.custom_data3, s);
+            _ = is_string_stickydiff(&e.custom_data3, &r.sticky_diffdata, mut_sdiff).await;
         }
         &_ => {}
     }
@@ -252,13 +255,13 @@ fn custom_data_check(r: &DirectiveRule, s: &mut StickyDiffData, e: &NormalizedEv
     r1 && r2 && r3
 }
 
-fn ip_port_check(
+async fn ip_port_check(
     r: &DirectiveRule,
     a: &NetworkAssets,
     e: &NormalizedEvent,
-    s: &mut StickyDiffData
+    mut_sdiff: bool
 ) -> bool {
-    let in_homenet = a.is_in_homenet(e.src_ip);
+    let in_homenet = a.is_in_homenet(&e.src_ip);
     if r.from == "HOME_NET" && !in_homenet {
         return false;
     }
@@ -283,16 +286,16 @@ fn ip_port_check(
 
     match r.sticky_different.as_str() {
         "SRC_IP" => {
-            _ = is_string_stickydiff(&e.src_ip.to_string(), s);
+            _ = is_string_stickydiff(&e.src_ip.to_string(), &r.sticky_diffdata, mut_sdiff).await;
         }
         "DST_IP" => {
-            _ = is_string_stickydiff(&e.dst_ip.to_string(), s);
+            _ = is_string_stickydiff(&e.dst_ip.to_string(), &r.sticky_diffdata, mut_sdiff).await;
         }
         "SRC_PORT" => {
-            _ = is_int_stickydiff(e.src_port.into(), s);
+            _ = is_int_stickydiff(e.src_port.into(), &r.sticky_diffdata, mut_sdiff).await;
         }
         "DST_PORT" => {
-            _ = is_int_stickydiff(e.dst_port.into(), s);
+            _ = is_int_stickydiff(e.dst_port.into(), &r.sticky_diffdata, mut_sdiff).await;
         }
         &_ => {}
     }
@@ -401,42 +404,52 @@ fn is_ip_match_csvrule(rules_in_csv: &str, ip: IpAddr) -> bool {
     result
 }
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(Deserialize, Default, Clone, Debug)]
 pub struct StickyDiffData {
     pub sdiff_string: Vec<String>,
     pub sdiff_int: Vec<u64>,
 }
 
-// isIntStickyDiff check if v fulfill stickydiff condition
-// ret code isn't used right now because the check is done in backlog
-fn is_int_stickydiff(v: u64, r: &mut StickyDiffData) -> bool {
-    for n in r.sdiff_int.iter() {
+// is_int_stickydiff checks if v fulfill stickydiff condition
+async fn is_int_stickydiff(v: u64, s: &Arc<RwLock<StickyDiffData>>, add_new: bool) -> Result<bool> {
+    let r_guard = s.read().await;
+    for n in r_guard.sdiff_int.iter() {
         if *n == v {
-            return false;
+            return Ok(false);
         }
     }
-    r.sdiff_int.push(v); // add it to the collection
-    true
+    if add_new {
+        let mut w_guard = s.write().await;
+        w_guard.sdiff_int.push(v); // add it to the collection
+    }
+    Ok(true)
 }
 
-// isStringStickyDiff check if v fulfill stickydiff condition
-// ret code isn't used right now because the check is done in backlog
-fn is_string_stickydiff(v: &str, r: &mut StickyDiffData) -> bool {
-    for s in r.sdiff_string.iter() {
+// is_string_stickydiff checks if v fulfill stickydiff condition
+async fn is_string_stickydiff(
+    v: &str,
+    s: &Arc<RwLock<StickyDiffData>>,
+    add_new: bool
+) -> Result<bool> {
+    let r_guard = s.read().await;
+    for s in r_guard.sdiff_string.iter() {
         if *s == v {
-            return false;
+            return Ok(false);
         }
     }
-    r.sdiff_string.push(v.to_string());
-    true
+    if add_new {
+        let mut w_guard = s.write().await;
+        w_guard.sdiff_string.push(v.to_string());
+    }
+    Ok(true)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SIDPair {
     plugin_id: u64,
     plugin_sid: Vec<u64>,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TaxoPair {
     product: Vec<String>,
     category: String,
@@ -464,9 +477,9 @@ pub fn get_quick_check_pairs(rules: &Vec<DirectiveRule>) -> (Vec<SIDPair>, Vec<T
 }
 
 // QuickCheckTaxoRule checks event against the key fields in a directive taxonomy rules
-pub fn quick_check_taxo_rule(pairs: &Vec<TaxoPair>, e: &NormalizedEvent) -> bool {
+pub fn quick_check_taxo_rule(pairs: &[TaxoPair], e: &NormalizedEvent) -> bool {
     let last = pairs
-        .into_iter()
+        .iter()
         .filter(|v| {
             let v = v.product
                 .clone()
@@ -481,9 +494,9 @@ pub fn quick_check_taxo_rule(pairs: &Vec<TaxoPair>, e: &NormalizedEvent) -> bool
 }
 
 // QuickCheckPluginRule checks event against the key fields in a directive plugin rules
-pub fn quick_check_plugin_rule(pairs: &Vec<SIDPair>, e: &NormalizedEvent) -> bool {
+pub fn quick_check_plugin_rule(pairs: &[SIDPair], e: &NormalizedEvent) -> bool {
     let last = pairs
-        .into_iter()
+        .iter()
         .filter(|v| v.plugin_id == e.plugin_id)
         .filter(|v| {
             let v = v.plugin_sid

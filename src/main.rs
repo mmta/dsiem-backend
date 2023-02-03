@@ -1,6 +1,8 @@
+use chrono::Duration;
 use clap::{ Parser, arg, command, Subcommand, Args };
-use tracing::{ info, error };
-use anyhow::{ Result, Error };
+use tokio::task;
+use tracing::{ info, error, debug };
+use anyhow::{ Result, Error, Context, anyhow };
 use tokio::sync::{ broadcast, mpsc, oneshot };
 
 mod logger;
@@ -102,6 +104,9 @@ pub struct ServeArgs {
     /// Duration in seconds before resetting overload condition state
     #[arg(long = "hold_duration", env, value_name = "seconds", default_value_t = 10)]
     hold_duration: u8,
+    /// Max. processing delay in seconds before throttling incoming events
+    #[arg(short = 'd', long = "max_delay", env, value_name = "seconds", default_value_t = 180)]
+    max_delay: u8,
     /// Check private IP addresses against threat intel
     #[arg(long = "intel_private_ip", env, default_value_t = false)]
     intel_private_ip: bool,
@@ -139,22 +144,27 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     let event_tx_clone = event_tx.clone();
 
-    let t = tokio::spawn(async {
+    let worker_handle = task::spawn(async {
         worker::start_worker(sargs.frontend, sargs.msq, sargs.node, event_tx, bp_rx, ready_tx).await
     });
-    ready_rx.await?;
+    ready_rx.await.context("initial worker setup process failed")?;
     let directives = directive
         ::load_directives(test_env)
         .map_err(|e| log_startup_err("loading directives", e))?;
     let assets = asset::NetworkAssets
         ::new(test_env)
         .map_err(|e| log_startup_err("loading assets", e))?;
+    let max_delay = Duration::seconds(sargs.max_delay.into())
+        .num_nanoseconds()
+        .ok_or_else(|| log_startup_err("reading max_delay", anyhow!("invalid value provided")))?;
+
     let manager = manager::Manager
-        ::new(test_env, directives, assets, sargs.hold_duration, bp_tx, event_tx_clone)
+        ::new(test_env, directives, assets, sargs.hold_duration, max_delay, bp_tx, event_tx_clone)
         .map_err(|e| log_startup_err("loading manager", e))?;
-    let t = tokio::spawn(async move { manager.listen().await });
-
-    t.await?.map_err(|e| log_startup_err("starting worker", e))?;
-
+    let manager_handle = task::spawn(async move { manager.listen().await });
+    let (worker_res, manager_res) = tokio::join!(worker_handle, manager_handle);
+    debug!("about to get result");
+    worker_res??;
+    manager_res??;
     Ok(())
 }

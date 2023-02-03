@@ -18,15 +18,13 @@ pub fn config_dir(test_env: bool) -> Result<PathBuf, std::io::Error> {
     Ok(dir)
 }
 
-/*
-pub fn log_dir() -> Result<PathBuf, std::io::Error> {
-    let mut dir = get_dir()?;
+pub fn log_dir(test_env: bool) -> Result<PathBuf, std::io::Error> {
+    let mut dir = get_dir(test_env)?;
     dir.push("logs");
     Ok(dir)
 }
-*/
 
-pub fn ref_to_digit(v: &String) -> Result<u8, String> {
+pub fn ref_to_digit(v: &str) -> Result<u8, String> {
     if !v.starts_with(':') {
         return Err("doesn't begin with :".to_string());
     }
