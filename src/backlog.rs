@@ -1,11 +1,12 @@
-use std::{ net::IpAddr, collections::HashSet, ops::Deref, sync::Arc };
+use std::{ net::IpAddr, collections::HashSet, ops::Deref, time::Duration };
 use chrono::{ DateTime, Utc };
 use serde::Deserialize;
 use serde_derive::Serialize;
 use tokio::{
-    sync::{ broadcast::Receiver, mpsc::Sender, RwLock as TokioRwLock },
+    sync::{ broadcast::Receiver, mpsc::Sender, RwLock as TokioRwLock, watch },
     fs::{ File, OpenOptions, self },
     io::AsyncWriteExt,
+    time::interval,
 };
 use parking_lot::RwLock;
 use tracing::{ info, debug, error, warn, trace };
@@ -17,6 +18,9 @@ use crate::{
     asset::NetworkAssets,
 };
 use anyhow::{ Result, Context, anyhow };
+
+const ALARM_EVENT_LOG: &str = "siem_alarm_events.json";
+const ALARM_LOG: &str = "siem_alarms.json";
 
 #[derive(Serialize, Deserialize, Debug, Hash, PartialEq, Eq)]
 pub struct CustomData {
@@ -31,23 +35,31 @@ pub struct SiemAlarmEvent {
     event_id: String,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum BacklogState {
+    Created,
+    Running,
+    Stopped,
+}
+
 // serialize should only for alarm fields
 #[derive(Debug, Serialize)]
 pub struct Backlog {
     pub id: String,
     pub title: String,
     pub status: String,
+    pub tag: String,
     pub kingdom: String,
     pub category: String,
-    pub created_time: i64,
-    pub update_time: i64,
-    pub status_time: RwLock<i64>,
+    pub created_time: RwLock<i64>,
+    pub update_time: RwLock<i64>,
     pub risk: RwLock<u8>,
-    pub risk_class: String,
-    pub tag: String,
+    pub risk_class: RwLock<String>,
     pub rules: Vec<DirectiveRule>,
     pub src_ips: RwLock<HashSet<IpAddr>>,
     pub dst_ips: RwLock<HashSet<IpAddr>>,
+    pub networks: RwLock<HashSet<String>>,
+    #[serde(skip_serializing_if = "is_locked_data_empty")]
     pub custom_data: RwLock<HashSet<CustomData>>,
     #[serde(skip_serializing, skip_deserializing)]
     pub current_stage: RwLock<u8>,
@@ -67,27 +79,46 @@ pub struct Backlog {
     alarm_events_writer: TokioRwLock<Option<File>>,
     #[serde(skip_serializing, skip_deserializing)]
     alarm_writer: TokioRwLock<Option<File>>,
+    #[serde(skip_serializing, skip_deserializing)]
+    backpressure_tx: Option<Sender<bool>>,
+    #[serde(skip_serializing, skip_deserializing)]
+    delete_channel: (tokio::sync::watch::Sender<bool>, tokio::sync::watch::Receiver<bool>),
+    #[serde(skip_serializing, skip_deserializing)]
+    pub state: RwLock<BacklogState>,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub min_alarm_lifetime: i64,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub med_risk_min: u8,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub med_risk_max: u8,
+}
+
+// This is only used for serialize
+fn is_locked_data_empty(s: &RwLock<HashSet<CustomData>>) -> bool {
+    let r = s.read();
+    r.is_empty()
 }
 
 impl Default for Backlog {
     fn default() -> Self {
+        let (tx, rx) = watch::channel(false);
         Backlog {
             id: generate_id(),
             title: "".to_string(),
             status: "".to_string(),
+            tag: "".to_string(),
             kingdom: "".to_string(),
             category: "".to_string(),
-            created_time: 0,
-            update_time: 0,
-            status_time: RwLock::new(0),
+            created_time: RwLock::new(0),
+            update_time: RwLock::new(0),
             risk: RwLock::new(0),
-            risk_class: "".to_string(),
-            tag: "".to_string(),
+            risk_class: RwLock::new("".to_string()),
             rules: vec![],
             current_stage: RwLock::new(1),
             highest_stage: 1,
             src_ips: RwLock::new(vec![].into_iter().collect()),
             dst_ips: RwLock::new(vec![].into_iter().collect()),
+            networks: RwLock::new(vec![].into_iter().collect()),
             custom_data: RwLock::new(vec![].into_iter().collect()),
             last_srcport: RwLock::new(0),
             last_dstport: RwLock::new(0),
@@ -96,56 +127,125 @@ impl Default for Backlog {
             assets: NetworkAssets::default(),
             alarm_events_writer: TokioRwLock::new(None),
             alarm_writer: TokioRwLock::new(None),
+            backpressure_tx: None,
+            delete_channel: (tx, rx),
+            state: RwLock::new(BacklogState::Created),
+            min_alarm_lifetime: 0,
+            med_risk_min: 0,
+            med_risk_max: 0,
         }
     }
 }
 
+pub struct BacklogOpt<'a> {
+    pub directive: &'a Directive,
+    pub asset: NetworkAssets,
+    pub event: &'a NormalizedEvent,
+    pub bp_tx: Sender<bool>,
+    pub min_alarm_lifetime: i64,
+    pub default_status: String,
+    pub default_tag: String,
+    pub med_risk_min: u8,
+    pub med_risk_max: u8,
+}
 impl Backlog {
-    pub async fn new(d: &Directive, a: NetworkAssets, e: &NormalizedEvent) -> Result<Self> {
+    pub async fn new(o: BacklogOpt<'_>) -> Result<Self> {
         let mut backlog = Backlog {
-            rules: init_backlog_rules(d, e).context("cannot initialize backlog rule")?,
+            title: o.directive.name.clone(),
+            kingdom: o.directive.kingdom.clone(),
+            category: o.directive.category.clone(),
+            status: o.default_status,
+            tag: o.default_tag,
+
+            rules: o.directive
+                .init_backlog_rules(o.event)
+                .context("cannot initialize backlog rule")?,
             current_stage: RwLock::new(1),
-            priority: d.priority,
-            all_rules_always_active: d.all_rules_always_active,
-            assets: a,
+            priority: o.directive.priority,
+            all_rules_always_active: o.directive.all_rules_always_active,
+            backpressure_tx: Some(o.bp_tx),
+            assets: o.asset,
+
+            min_alarm_lifetime: o.min_alarm_lifetime,
+            med_risk_min: o.med_risk_min,
+            med_risk_max: o.med_risk_max,
             ..Default::default()
         };
-        info!(directive_id = d.id, backlog.id, "Creating new backlog");
         backlog.highest_stage = backlog.rules
             .iter()
             .map(|v| v.stage)
             .max()
             .unwrap_or_default();
-
         let log_dir = utils::log_dir(false).unwrap();
         fs::create_dir_all(&log_dir).await?;
         let file = OpenOptions::new()
             .write(true)
             .create(true)
-            .open(log_dir.join("siem_alarm_events.json")).await?;
+            .open(log_dir.join(ALARM_EVENT_LOG)).await?;
         backlog.alarm_events_writer = TokioRwLock::new(Some(file));
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(log_dir.join("siem_alarms.json")).await?;
+        let file = OpenOptions::new().write(true).create(true).open(log_dir.join(ALARM_LOG)).await?;
         backlog.alarm_writer = TokioRwLock::new(Some(file));
+
+        info!(directive_id = o.directive.id, backlog.id, "new backlog created");
 
         Ok(backlog)
     }
-    pub async fn start(&self, mut rx: Receiver<NormalizedEvent>, tx: Sender<bool>, max_delay: i64) {
-        debug!(self.id, "enter running state");
-        // need a way to exit this loop immediately after:
-        // - backlog timeout, max stage and occurrence reached
-        let p = &rx;
 
-        while let Ok(event) = rx.recv().await {
-            debug!(self.id, event.id, "event received");
-            let res = self.process_new_event(&event, &tx, max_delay).await;
-            if res.is_err() {
-                error!(self.id, event.id, "{}", res.unwrap_err());
+    async fn handle_expiration(&self) -> Result<()> {
+        self.set_rule_status("timeout")?;
+        self.update_alarm(false).await?;
+        self.delete()
+    }
+
+    pub async fn start(&self, mut rx: Receiver<NormalizedEvent>, max_delay: i64) -> Result<()> {
+        let mut expiration_checker = interval(Duration::from_secs(10));
+        let mut delete_rx = self.delete_channel.1.clone();
+        debug!(self.id, "enter running state");
+        self.set_state(BacklogState::Running);
+
+        loop {
+            tokio::select! {
+               _ = expiration_checker.tick() => {
+                if let Ok((expired, seconds_left)) = self.is_expired() {
+                    if expired {
+                        debug!(self.id, "backlog expired, setting last stage status to timeout and deleting it");
+                        if let Err(e) = self.handle_expiration().await {
+                            debug!{self.id, "error updating status and deleting backlog: {}", e.to_string()}
+                        }
+                    } else {
+                        debug!(self.id, "backlog will expire in {} seconds", seconds_left);
+                    }
+                }
+               },
+               Ok(event) = rx.recv() => {
+                debug!(self.id, event.id, "event received");
+                if let Err(e) = self.process_new_event(&event,  max_delay).await {
+                    error!(self.id, event.id, "{}", e);
+                }
+               },
+               _ = delete_rx.changed() => {
+                debug!(self.id, "backlog delete signal received");
+                break
+               },
             }
         }
-        debug!(self.id, "exiting running state");
+        self.set_state(BacklogState::Stopped);
+        info!(self.id, "exited running state");
+        Ok(())
+    }
+
+    fn is_expired(&self) -> Result<(bool, i64)> {
+        // this calculates in seconds
+        let limit = Utc::now().timestamp() - self.min_alarm_lifetime;
+        let curr_rule = self.current_rule()?;
+        let start = curr_rule.start_time.read();
+        let timeout = curr_rule.timeout;
+        let max_time = *start + i64::try_from(timeout)?;
+        Ok((max_time < limit, max_time - limit))
+    }
+    fn set_state(&self, s: BacklogState) {
+        let mut w = self.state.write();
+        *w = s;
     }
 
     fn is_time_in_order(&self, ts: &DateTime<Utc>) -> bool {
@@ -171,12 +271,7 @@ impl Backlog {
             .ok_or_else(|| anyhow!("cannot locate the current rule"))
     }
 
-    pub async fn process_new_event(
-        &self,
-        event: &NormalizedEvent,
-        bp_tx: &Sender<bool>,
-        max_delay: i64
-    ) -> Result<()> {
+    pub async fn process_new_event(&self, event: &NormalizedEvent, max_delay: i64) -> Result<()> {
         let curr_rule = self.current_rule()?;
 
         let n_string: usize;
@@ -210,6 +305,8 @@ impl Backlog {
                 }
             }
             debug!(self.id, event.id, "event doesnt match");
+            debug!(self.id, "{:?}", curr_rule);
+            debug!(self.id, "{:?}", event);
             return Ok(());
         }
         // event match current rule, processing it further here
@@ -235,14 +332,10 @@ impl Backlog {
 
         if self.is_under_pressure(event.rcvd_time, max_delay) {
             warn!(self.id, event.id, "is under pressure");
-            let res = bp_tx.try_send(true);
-            if res.is_err() {
-                warn!(
-                    self.id,
-                    event.id,
-                    "error sending under pressure signal: {}",
-                    res.unwrap_err()
-                );
+            if let Some(tx) = &self.backpressure_tx {
+                if let Err(e) = tx.try_send(true) {
+                    warn!(self.id, event.id, "error sending under pressure signal: {}", e);
+                }
             }
         }
         debug!(self.id, event.id, "processing matching event");
@@ -252,7 +345,7 @@ impl Backlog {
     fn is_stage_reach_max_event_count(&self) -> Result<bool> {
         let curr_rule = self.current_rule()?;
         let reader = curr_rule.event_ids.read();
-        Ok(reader.len() > curr_rule.occurrence)
+        Ok(reader.len() >= curr_rule.occurrence)
     }
 
     fn set_rule_status(&self, status: &str) -> Result<()> {
@@ -288,14 +381,17 @@ impl Backlog {
             .max()
             .unwrap_or_default();
 
-        let reader = self.risk.read();
-        let prior_risk = reader.deref();
+        let prior_risk: u8;
+        {
+            let reader = self.risk.read();
+            prior_risk = *reader.deref();
+        }
 
         let value = std::cmp::max(src_value, dst_value);
         let priority = self.priority;
         let reliability = self.current_rule()?.reliability;
         let risk = (priority * reliability * value) / 25;
-        if risk != *prior_risk {
+        if risk != prior_risk {
             info!(self.id, "risk changed from {} to {}", prior_risk, risk);
             let mut writer = self.risk.write();
             *writer = risk;
@@ -303,6 +399,19 @@ impl Backlog {
         } else {
             Ok(false)
         }
+    }
+
+    fn update_risk_class(&self) {
+        let mut w = self.risk_class.write();
+        let r = self.risk.read();
+        let risk = *r;
+        *w = if risk < self.med_risk_min {
+            "Low".to_string()
+        } else if risk >= self.med_risk_min && risk <= self.med_risk_max {
+            "Medium".to_string()
+        } else {
+            "High".to_string()
+        };
     }
 
     fn is_last_stage(&self) -> bool {
@@ -315,58 +424,63 @@ impl Backlog {
         // exit early if the newly added event hasnt caused events_count == occurrence
         // for the current stage
         if !self.is_stage_reach_max_event_count()? {
+            debug!(self.id, event.id, "stage max event count not yet reached");
             return Ok(());
         }
         // the new event has caused events_count == occurrence
+        debug!(self.id, event.id, "stage max event count reached");
         self.set_rule_status("finished")?;
         self.set_rule_endtime(event.timestamp)?;
 
         // update risk as needed
-        _ = self.update_risk()?;
+        let updated = self.update_risk()?;
+        if updated {
+            self.update_risk_class();
+        }
 
+        debug!(self.id, "checking if this is the last stage");
         // if it causes the last stage to reach events_count == occurrence, delete it
         if self.is_last_stage() {
             info!(self.id, "reached max stage and occurrence");
-            self.update_alarm(true)?;
+            self.update_alarm(true).await?;
             self.delete()?;
             return Ok(());
         }
 
         // reach max occurrence, but not in last stage.
+        debug!(
+            self.id,
+            event.id,
+            "stage max event count reached, increasing stage and updating alarm"
+        );
         // increase stage.
-        self.increase_stage()?;
+        if self.increase_stage() {
+            // set rule startTime for the new stage
+            self.set_rule_starttime(event.timestamp)?;
+            // stageIncreased, update alarm to publish new stage startTime
+            self.update_alarm(true).await?;
+        } else {
+            error!(self.id, event.id, "stage not increased");
+        }
 
-        // set rule startTime for the new stage
-        self.set_rule_starttime(event.timestamp)?;
-
-        // stageIncreased, update alarm to publish new stage startTime
-        self.update_alarm(true)?;
-        Ok(())
-    }
-
-    fn update_alarm(&self, check_intel_vuln: bool) -> Result<()> {
         Ok(())
     }
 
     fn delete(&self) -> Result<()> {
+        self.delete_channel.0.send(true)?;
         Ok(())
     }
 
-    fn increase_stage(&self) -> Result<()> {
-        let mut increased = false;
-        {
-            let mut w = self.current_stage.write();
-            if *w < self.highest_stage {
-                *w += 1;
-                increased = true;
-            }
+    fn increase_stage(&self) -> bool {
+        let mut w = self.current_stage.write();
+        if *w < self.highest_stage {
+            *w += 1;
+            info!(self.id, "stage increased to {}", *w);
+            true
+        } else {
+            info!(self.id, "stage is at the highest level");
+            false
         }
-        if increased {
-            let r = self.current_stage.read();
-            info!(self.id, "stage increased to {}", *r);
-        }
-
-        Ok(())
     }
 
     async fn append_and_write_event(&self, event: &NormalizedEvent) -> Result<()> {
@@ -374,10 +488,16 @@ impl Backlog {
         {
             let mut w = curr_rule.event_ids.write();
             w.insert(event.id.clone());
+        }
+        {
             let mut w = self.src_ips.write();
             w.insert(event.src_ip);
+        }
+        {
             let mut w = self.dst_ips.write();
             w.insert(event.dst_ip);
+        }
+        {
             let mut w = self.custom_data.write();
             if !event.custom_data1.is_empty() {
                 w.insert(CustomData {
@@ -398,23 +518,53 @@ impl Backlog {
                 });
             }
         }
-        self.set_ports(event)?;
-        self.set_status_time()?;
+
+        self.set_ports(event);
+        self.set_update_time();
         self.append_siem_alarm_events(event).await?;
         Ok(())
     }
 
-    fn set_ports(&self, e: &NormalizedEvent) -> Result<()> {
+    fn set_ports(&self, e: &NormalizedEvent) {
         let mut w = self.last_srcport.write();
         *w = e.src_port;
         let mut w = self.last_dstport.write();
         *w = e.dst_port;
-        Ok(())
     }
-    fn set_status_time(&self) -> Result<()> {
-        let mut w = self.status_time.write();
+    fn set_update_time(&self) {
+        let mut w = self.update_time.write();
         *w = Utc::now().timestamp();
-        Ok(())
+    }
+
+    fn set_created_time(&self) {
+        let is_empty = {
+            let r = self.created_time.read();
+            *r == 0
+        };
+        if is_empty {
+            let r = self.update_time.read();
+            let mut w = self.created_time.write();
+            *w = *r;
+        }
+    }
+
+    fn is_under_pressure(&self, rcvd_time: i64, max_delay: i64) -> bool {
+        let now = Utc::now().timestamp_nanos();
+        now - rcvd_time > max_delay
+    }
+
+    fn update_networks(&self) {
+        let mut w = self.networks.write();
+        for v in [&self.src_ips, &self.dst_ips] {
+            let r = v.read();
+            for ip in r.iter() {
+                if let Some(v) = self.assets.get_asset_networks(ip) {
+                    for x in v {
+                        w.insert(x);
+                    }
+                }
+            }
+        }
     }
 
     async fn append_siem_alarm_events(&self, e: &NormalizedEvent) -> Result<()> {
@@ -441,86 +591,32 @@ impl Backlog {
         Ok(())
     }
 
-    fn is_under_pressure(&self, rcvd_time: i64, max_delay: i64) -> bool {
-        let now = Utc::now().timestamp_nanos();
-        now - rcvd_time > max_delay
-    }
-}
-
-pub fn init_backlog_rules(d: &Directive, e: &NormalizedEvent) -> Result<Vec<DirectiveRule>> {
-    let mut result = vec![];
-    for (i, rule) in d.rules.iter().enumerate() {
-        let mut r = rule.clone();
-        if i == 0 {
-            r.start_time = Arc::new(RwLock::new(e.timestamp.timestamp()));
-
-            // if flag is active, replace ANY and HOME_NET on the first rule with specific addresses from event
-            if d.all_rules_always_active {
-                if r.from == "ANY" || r.from == "HOME_NET" || r.from == "!HOME_NET" {
-                    r.from = e.src_ip.to_string();
-                }
-                if r.to == "ANY" || r.to == "HOME_NET" || r.to == "!HOME_NET" {
-                    r.to = e.dst_ip.to_string();
-                }
-            }
-            // reference isn't allowed on first rule so we'll skip the rest
-        } else {
-            // for the rest, refer to the referenced stage if its not ANY or HOME_NET or !HOME_NET
-            // if the reference is ANY || HOME_NET || !HOME_NET then refer to event if its in the format of
-            // :refs
-            if let Ok(v) = utils::ref_to_digit(&r.from) {
-                let vmin1 = usize::from(v - 1);
-                let refs = &d.rules[vmin1].from;
-                r.from = if refs != "ANY" && refs != "HOME_NET" && refs != "!HOME_NET" {
-                    refs.to_string()
-                } else {
-                    e.src_ip.to_string()
-                };
-            }
-            if let Ok(v) = utils::ref_to_digit(&r.to) {
-                let refs = &d.rules[usize::from(v - 1)].to;
-                r.to = if refs != "ANY" && refs != "HOME_NET" && refs != "!HOME_NET" {
-                    refs.to_string()
-                } else {
-                    e.dst_ip.to_string()
-                };
-            }
-            if let Ok(v) = utils::ref_to_digit(&r.port_from) {
-                let refs = &d.rules[usize::from(v - 1)].port_from;
-                r.port_from = if refs != "ANY" { refs.to_string() } else { e.src_port.to_string() };
-            }
-            if let Ok(v) = utils::ref_to_digit(&r.port_to) {
-                let refs = &d.rules[usize::from(v - 1)].port_to;
-                r.port_to = if refs != "ANY" { refs.to_string() } else { e.dst_port.to_string() };
-            }
-
-            // references in custom data
-            if let Ok(v) = utils::ref_to_digit(&r.custom_data1) {
-                let refs = &d.rules[usize::from(v - 1)].custom_data1;
-                r.custom_data1 = if refs != "ANY" {
-                    refs.to_string()
-                } else {
-                    e.custom_data1.clone()
-                };
-            }
-            if let Ok(v) = utils::ref_to_digit(&r.custom_data2) {
-                let refs = &d.rules[usize::from(v - 1)].custom_data2;
-                r.custom_data2 = if refs != "ANY" {
-                    refs.to_string()
-                } else {
-                    e.custom_data2.clone()
-                };
-            }
-            if let Ok(v) = utils::ref_to_digit(&r.custom_data3) {
-                let refs = &d.rules[usize::from(v - 1)].custom_data3;
-                r.custom_data3 = if refs != "ANY" {
-                    refs.to_string()
-                } else {
-                    e.custom_data3.clone()
-                };
-            }
+    async fn update_alarm(&self, check_intvuln: bool) -> Result<()> {
+        if *self.risk.read() == 0 {
+            trace!(self.id, "risk is zero, skip updating alarm");
+            return Ok(());
         }
-        result.push(r);
+        debug!(self.id, check_intvuln, "updating alarm");
+        self.set_created_time();
+        self.update_networks();
+
+        let s = serde_json::to_string(&self)? + "\n";
+        let mut binding = self.alarm_writer.write().await;
+        let w = binding.as_mut().unwrap();
+        w.write_all(s.as_bytes()).await?;
+
+        Ok(())
+
+        /* postponed
+        if xc.IntelEnabled && checkIntelVuln {
+            // do intel check in the background
+            asyncIntelCheck(a, connID, intelCheckPrivateIP, tx)
+        }
+    
+        if xc.VulnEnabled && checkIntelVuln {
+            // do vuln check in the background
+            asyncVulnCheck(a, lastSrcPort, lastDstPort, connID, tx)
+        }
+        */
     }
-    Ok(result)
 }

@@ -5,7 +5,7 @@ use futures::StreamExt;
 use tokio::{ sync::{ broadcast::Sender, oneshot, mpsc::Receiver } };
 use std::str;
 
-use crate::{ utils, event::{ self, NormalizedEvent } };
+use crate::{ utils, event::{ self, NormalizedEvent }, asset::NetworkAssets };
 use serde::Deserialize;
 use tracing::{ info, error, debug };
 use anyhow::{ Result, Context, anyhow };
@@ -25,7 +25,8 @@ pub async fn start_worker(
     node_name: String,
     event_tx: Sender<event::NormalizedEvent>,
     bp_rx: Receiver<bool>,
-    ready_tx: oneshot::Sender<()>
+    ready_tx: oneshot::Sender<()>,
+    assets: &NetworkAssets
 ) -> Result<()> {
     let config_dir = utils::config_dir(false)?;
     download_config_files(config_dir.to_string_lossy().to_string(), frontend_url, node_name).await?;
@@ -62,6 +63,9 @@ pub async fn start_worker(
                 continue;
             }
             let e = res.unwrap();
+            if assets.is_whitelisted(&e.src_ip) {
+                continue;
+            }
             let res = event_tx.send(e.clone());
             if res.is_err() {
                 error!("cannot send event {}: {}, skipping it", e.id, res.unwrap_err());

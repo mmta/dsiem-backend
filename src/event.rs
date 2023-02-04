@@ -1,9 +1,9 @@
 use std::{ net::IpAddr, str::FromStr };
 
 use chrono::prelude::*;
-use serde_derive::{ Serialize, Deserialize };
+use serde_derive::Deserialize;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct NormalizedEvent {
     #[serde(rename(deserialize = "event_id"))]
     pub id: String,
@@ -73,9 +73,11 @@ impl Default for NormalizedEvent {
     }
 }
 
+/*
 impl NormalizedEvent {
     pub fn valid(&self) -> bool {
         (self.plugin_id != 0 && self.plugin_sid != 0) ||
             (!self.product.is_empty() && !self.category.is_empty())
     }
 }
+*/

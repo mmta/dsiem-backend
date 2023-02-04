@@ -4,7 +4,7 @@ use cidr::IpCidr;
 use serde::{ Serializer, Deserializer };
 use serde_derive::{ Deserialize, Serialize };
 use parking_lot::RwLock;
-use tracing::warn;
+use tracing::{ warn, error };
 
 use crate::{ event::NormalizedEvent, asset::NetworkAssets };
 use anyhow::Result;
@@ -61,7 +61,7 @@ pub struct DirectiveRule {
     pub port_to: String,
     pub protocol: String,
     pub reliability: u8,
-    pub timeout: u64,
+    pub timeout: u32,
     #[serde(skip_serializing_if = "is_locked_zero_or_less")]
     #[serde(default)]
     pub start_time: Arc<RwLock<i64>>,
@@ -178,6 +178,7 @@ fn plugin_rule_check(
         }
     }
     if !sid_match {
+        error!("returning 3");
         return false;
     }
     if r.sticky_different == "PLUGIN_SID" {
@@ -263,11 +264,11 @@ fn ip_port_check(
     e: &NormalizedEvent,
     mut_sdiff: bool
 ) -> bool {
-    let in_homenet = a.is_in_homenet(&e.src_ip);
-    if r.from == "HOME_NET" && !in_homenet {
+    let srcip_in_homenet = a.is_in_homenet(&e.src_ip);
+    if r.from == "HOME_NET" && !srcip_in_homenet {
         return false;
     }
-    if r.from == "!HOME_NET" && in_homenet {
+    if r.from == "!HOME_NET" && srcip_in_homenet {
         return false;
     }
     // covers  r.From == "IP", r.From == "IP1, IP2, !IP3", r.From == CIDR-netaddr, r.From == "CIDR1, CIDR2, !CIDR3"
@@ -279,10 +280,28 @@ fn ip_port_check(
     {
         return false;
     }
-    if r.from != "ANY" && !is_string_match_csvrule(&r.port_from, &e.src_port.to_string()) {
+
+    let dst_ip_in_homenet = a.is_in_homenet(&e.dst_ip);
+    if r.to == "HOME_NET" && !srcip_in_homenet {
         return false;
     }
-    if r.to != "ANY" && !is_string_match_csvrule(&r.port_to, &e.dst_port.to_string()) {
+    if r.to == "!HOME_NET" && dst_ip_in_homenet {
+        return false;
+    }
+    // covers  r.From == "IP", r.From == "IP1, IP2, !IP3", r.From == CIDR-netaddr, r.From == "CIDR1, CIDR2, !CIDR3"
+    if
+        r.to != "HOME_NET" &&
+        r.to != "!HOME_NET" &&
+        r.to != "ANY" &&
+        !is_ip_match_csvrule(&r.to, e.dst_ip)
+    {
+        return false;
+    }
+
+    if r.port_from != "ANY" && !is_string_match_csvrule(&r.port_from, &e.src_port.to_string()) {
+        return false;
+    }
+    if r.port_to != "ANY" && !is_string_match_csvrule(&r.port_to, &e.dst_port.to_string()) {
         return false;
     }
 
@@ -325,6 +344,7 @@ fn is_string_match_csvrule(rules_in_csv: &str, term: &String) -> bool {
         .map(|s| s.to_string())
         .collect();
     for mut v in rules {
+        v = v.trim().to_owned();
         let is_inverse = v.starts_with('!');
         if is_inverse {
             v = v.replace('!', "");
@@ -362,7 +382,7 @@ fn is_ip_match_csvrule(rules_in_csv: &str, ip: IpAddr) -> bool {
     let mut result = false;
     let rules: Vec<String> = rules_in_csv
         .split(',')
-        .map(|s| s.to_string())
+        .map(|s| s.trim().to_string())
         .collect();
     for mut v in rules {
         let is_inverse = v.starts_with('!');
@@ -374,7 +394,12 @@ fn is_ip_match_csvrule(rules_in_csv: &str, ip: IpAddr) -> bool {
         }
         let res = v.parse();
         if res.is_err() {
-            warn!("cannot parse CIDR {}, make sure the directive is configured correctly", v);
+            warn!(
+                "cannot parse CIDR {}: {:?}. make sure the directive is configured correctly",
+                v,
+                res.unwrap_err()
+            );
+            continue;
         }
         let ipnet_a: IpCidr = res.unwrap();
         let term_is_equal = ipnet_a.contains(&ip);
@@ -510,7 +535,10 @@ pub fn quick_check_plugin_rule(pairs: &[SIDPair], e: &NormalizedEvent) -> bool {
 
 #[cfg(test)]
 mod test {
+    use std::str::FromStr;
+
     use super::*;
+    use table_test::table_test;
 
     #[test]
     fn test_get_quick_check_pairs() {
@@ -529,6 +557,16 @@ mod test {
         let (p, q) = get_quick_check_pairs(&rules);
         assert!(!p.is_empty());
         assert!(!q.is_empty());
+        let v = p
+            .into_iter()
+            .filter(|v| v.plugin_id == 1 && v.plugin_sid == vec![1, 2, 3])
+            .last();
+        assert!(v.is_some());
+        let v = q
+            .into_iter()
+            .filter(|v| v.product == vec!["checkpoint"] && v.category == "firewall")
+            .last();
+        assert!(v.is_some());
         let (_, q) = get_quick_check_pairs(&vec![r1]);
         assert!(q.is_empty())
     }
@@ -577,5 +615,147 @@ mod test {
         assert!(!quick_check_taxo_rule(&pair, &event));
         event.product = "pf".to_string();
         assert!(!quick_check_taxo_rule(&pair, &event))
+    }
+
+    #[test]
+    fn test_netaddr_in_csv() {
+        let table = vec![
+            (("192.168.0.1", "192.168.0.0/16"), true),
+            (("192.168.0.1", "192.168.0.1"), true),
+            (("192.168.0.1", "192.168.0.1/32"), true),
+            (("192.168.0.1", "192.168.0.1/24"), false),
+            (("192.168.0.1", "!10.0.0.0/16"), true),
+            (("192.168.0.1", "!10.0.0.0/16, 192.168.0.0/24"), true),
+            (("192.168.0.1", "!192.168.0.0/24"), false),
+            (("192.168.0.1", "10.0.0.0/16, !192.168.0.0/16"), false),
+            (("192.168.0.1", "10.0.0.0/16, !192.168.0.0/16, 192.168.0.0/16"), false)
+        ];
+
+        for (validator, (input_1, input_2), expected) in table_test!(table) {
+            let ip = input_1.parse::<IpAddr>().unwrap();
+            let actual = is_ip_match_csvrule(input_2, ip);
+
+            validator
+                .given(&format!("rules: {}, term: {}", input_2, input_1))
+                .when("is_ip_match_csvrule")
+                .then(&format!("it should be {}", expected))
+                .assert_eq(expected, actual);
+        }
+    }
+
+    #[test]
+    fn test_term_in_csv() {
+        let table = vec![
+            (("1231", "1000, 1001"), false),
+            (("1231", "!1231, 1001"), false),
+            (("1231", "1000, !1231"), false),
+            (("1231", "1231, !1231"), true),
+            (("1231", "!1231, 1231"), false),
+            (("1231", "!1000, !1001"), true),
+            (("1231", "!1000, 1001"), true),
+            (("1231", "1001, !1000"), true),
+            (("1231", "!1000, 1231"), true),
+            (("foo", "!bar, foobar, foo"), true)
+        ];
+
+        for (validator, (input_1, input_2), expected) in table_test!(table) {
+            let actual = is_string_match_csvrule(input_2, &input_1.to_owned());
+
+            validator
+                .given(&format!("rules: {}, term: {}", input_2, input_1))
+                .when("is_string_match_csvrule")
+                .then(&format!("it should be {}", expected))
+                .assert_eq(expected, actual);
+        }
+    }
+
+    #[test]
+    fn test_plugin_rule() {
+        let asset_string =
+            r#"{
+            "assets": [
+              {
+                "name": "Firewall",
+                "cidr": "192.168.0.1/32",
+                "value": 5
+              },
+              {
+                "name": "VulnerabilityScanner",
+                "cidr": "192.168.0.2/32",
+                "value": 5,
+                "whitelisted": true
+              },
+              {
+                "name": "192-168-Net",
+                "cidr": "192.168.0.0/16",
+                "value": 2
+              },
+              {
+                "name": "10-Net",
+                "cidr": "10.0.0.0/8",
+                "value": 2
+              },
+              {
+                "name": "172-16-Net",
+                "cidr": "172.16.0.0/12",
+                "value": 2
+              }
+            ]  
+          }
+          "#;
+        let a = NetworkAssets::from_str(asset_string.to_owned()).unwrap();
+
+        let r1 = DirectiveRule {
+            rule_type: RuleType::PluginRule,
+            plugin_id: 1001,
+            plugin_sid: vec![50001],
+            product: vec!["IDS".to_string()],
+            category: "Malware".to_string(),
+            subcategory: vec!["C&C Communication".to_string()],
+            from: "HOME_NET".to_string(),
+            to: "ANY".to_string(),
+            port_from: "ANY".to_string(),
+            port_to: "ANY".to_string(),
+            protocol: "ANY".to_string(),
+            ..Default::default()
+        };
+        let e1 = NormalizedEvent {
+            plugin_id: 1001,
+            plugin_sid: 50001,
+            product: "IDS".to_string(),
+            category: "Malware".to_string(),
+            subcategory: "C&C Communication".to_string(),
+            src_ip: IpAddr::from_str("192.168.0.1").unwrap(),
+            dst_ip: IpAddr::from_str("8.8.8.200").unwrap(),
+            src_port: 31337,
+            dst_port: 80,
+            ..Default::default()
+        };
+
+        assert!(a.is_in_homenet(&e1.src_ip));
+
+        let table = vec![
+            ((1, e1.clone(), r1.clone(), false), true),
+            ((2, e1.clone(), r1.clone(), false), true)
+        ];
+
+        /*
+		{1, e1, r1, s1, true}, {2, e1, r2, s1, true}, {3, e1, r3, s1, false}, {4, e1, r4, s1, false},
+		{5, e1, r5, s1, false}, {6, e1, r6, s1, false}, {7, e1, r7, s1, true}, {8, e1, r8, s1, false},
+		{9, e1, r9, s1, false}, {10, e2, r10, s1, false}, {11, e1, r11, s1, false},
+		{12, e1, r12, s1, false}, {13, e1, r13, s1, false}, {14, e3, r14, s1, false},
+		{15, e1, r15, s1, false}, {16, e1, r16, s1, false}, {17, e1, r17, s1, false},
+
+         */
+
+        for (validator, (case_id, event, rule, mutate_sdiff), expected) in table_test!(table) {
+            let actual = rule.does_event_match(&a, &event, mutate_sdiff);
+
+            validator
+                .given(&format!("test_case: {}, ", case_id))
+                .when("does_event_match")
+                .then(&format!("it should be {}", expected))
+                .assert_eq(expected, actual);
+        }
     }
 }

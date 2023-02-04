@@ -5,6 +5,8 @@ use tracing::{ info, error, debug };
 use anyhow::{ Result, Error, Context, anyhow };
 use tokio::sync::{ broadcast, mpsc, oneshot };
 
+use crate::manager::ManagerOpt;
+
 mod logger;
 mod rule;
 mod directive;
@@ -14,6 +16,7 @@ mod asset;
 mod worker;
 mod manager;
 mod backlog;
+mod xcorrelator;
 
 #[derive(Parser)]
 #[command(
@@ -106,7 +109,7 @@ pub struct ServeArgs {
     hold_duration: u8,
     /// Max. processing delay in seconds before throttling incoming events
     #[arg(short = 'd', long = "max_delay", env, value_name = "seconds", default_value_t = 180)]
-    max_delay: u8,
+    max_delay: u16,
     /// Check private IP addresses against threat intel
     #[arg(long = "intel_private_ip", env, default_value_t = false)]
     intel_private_ip: bool,
@@ -139,28 +142,62 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     let SubCommands::ServeCommand(sargs) = args.subcommand;
     info!("starting dsiem backend server using frontend at {}", sargs.frontend);
 
+    let max_delay = Duration::seconds(sargs.max_delay.into())
+        .num_nanoseconds()
+        .ok_or_else(|| log_startup_err("reading max_delay", anyhow!("invalid value provided")))?;
+    let min_alarm_lifetime = Duration::minutes(sargs.min_alarm_lifetime.into()).num_seconds();
+    if sargs.med_risk_min < 2 || sargs.med_risk_max > 9 || sargs.med_risk_min == sargs.med_risk_max {
+        return Err(
+            log_startup_err(
+                "reading med_risk_min and med_risk_max",
+                anyhow!("invalid value provided")
+            )
+        );
+    }
+
     let (event_tx, _) = broadcast::channel(sargs.max_queue);
     let (bp_tx, bp_rx) = mpsc::channel::<bool>(128);
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     let event_tx_clone = event_tx.clone();
 
-    let worker_handle = task::spawn(async {
-        worker::start_worker(sargs.frontend, sargs.msq, sargs.node, event_tx, bp_rx, ready_tx).await
+    let assets = asset::NetworkAssets
+        ::new(test_env)
+        .map_err(|e| log_startup_err("loading assets", e))?;
+
+    let worker_handle = task::spawn({
+        let assets = assets.clone();
+        async move {
+            worker::start_worker(
+                sargs.frontend,
+                sargs.msq,
+                sargs.node,
+                event_tx,
+                bp_rx,
+                ready_tx,
+                &assets
+            ).await
+        }
     });
     ready_rx.await.context("initial worker setup process failed")?;
     let directives = directive
         ::load_directives(test_env)
         .map_err(|e| log_startup_err("loading directives", e))?;
-    let assets = asset::NetworkAssets
-        ::new(test_env)
-        .map_err(|e| log_startup_err("loading assets", e))?;
-    let max_delay = Duration::seconds(sargs.max_delay.into())
-        .num_nanoseconds()
-        .ok_or_else(|| log_startup_err("reading max_delay", anyhow!("invalid value provided")))?;
 
-    let manager = manager::Manager
-        ::new(test_env, directives, assets, sargs.hold_duration, max_delay, bp_tx, event_tx_clone)
-        .map_err(|e| log_startup_err("loading manager", e))?;
+    let opt = ManagerOpt {
+        test_env,
+        directives,
+        assets,
+        hold_duration: sargs.hold_duration,
+        max_delay,
+        min_alarm_lifetime,
+        backpressure_tx: bp_tx,
+        publisher: event_tx_clone,
+        med_risk_max: sargs.med_risk_max,
+        med_risk_min: sargs.med_risk_min,
+        default_status: sargs.status[0].clone(),
+        default_tag: sargs.tags[0].clone(),
+    };
+    let manager = manager::Manager::new(opt).map_err(|e| log_startup_err("loading manager", e))?;
     let manager_handle = task::spawn(async move { manager.listen().await });
     let (worker_res, manager_res) = tokio::join!(worker_handle, manager_handle);
     debug!("about to get result");

@@ -1,4 +1,5 @@
-use std::{ fs, str::FromStr };
+use std::{ fs, str::FromStr, sync::Arc };
+use parking_lot::RwLock;
 use regex::Regex;
 use serde_derive::Deserialize;
 extern crate glob;
@@ -6,7 +7,11 @@ use glob::glob;
 use tracing::info;
 use anyhow::{ Result, anyhow };
 
-use crate::{ rule::{ self, RuleType }, utils::{ self, ref_to_digit } };
+use crate::{
+    rule::{ self, RuleType, DirectiveRule },
+    utils::{ self, ref_to_digit },
+    event::NormalizedEvent,
+};
 
 const DIRECTIVES_GLOB: &str = "directives_*.json";
 
@@ -30,6 +35,94 @@ pub struct Directive {
 #[derive(Deserialize)]
 pub struct Directives {
     pub directives: Vec<Directive>,
+}
+
+impl Directive {
+    pub fn init_backlog_rules(&self, e: &NormalizedEvent) -> Result<Vec<DirectiveRule>> {
+        let mut result = vec![];
+        for (i, rule) in self.rules.iter().enumerate() {
+            let mut r = rule.clone();
+            if i == 0 {
+                r.start_time = Arc::new(RwLock::new(e.timestamp.timestamp()));
+
+                // if flag is active, replace ANY and HOME_NET on the first rule with specific addresses from event
+                if self.all_rules_always_active {
+                    if r.from == "ANY" || r.from == "HOME_NET" || r.from == "!HOME_NET" {
+                        r.from = e.src_ip.to_string();
+                    }
+                    if r.to == "ANY" || r.to == "HOME_NET" || r.to == "!HOME_NET" {
+                        r.to = e.dst_ip.to_string();
+                    }
+                }
+                // reference isn't allowed on first rule so we'll skip the rest
+            } else {
+                // for the rest, refer to the referenced stage if its not ANY or HOME_NET or !HOME_NET
+                // if the reference is ANY || HOME_NET || !HOME_NET then refer to event if its in the format of
+                // :refs
+                if let Ok(v) = utils::ref_to_digit(&r.from) {
+                    let vmin1 = usize::from(v - 1);
+                    let refs = &self.rules[vmin1].from;
+                    r.from = if refs != "ANY" && refs != "HOME_NET" && refs != "!HOME_NET" {
+                        refs.to_string()
+                    } else {
+                        e.src_ip.to_string()
+                    };
+                }
+                if let Ok(v) = utils::ref_to_digit(&r.to) {
+                    let refs = &self.rules[usize::from(v - 1)].to;
+                    r.to = if refs != "ANY" && refs != "HOME_NET" && refs != "!HOME_NET" {
+                        refs.to_string()
+                    } else {
+                        e.dst_ip.to_string()
+                    };
+                }
+                if let Ok(v) = utils::ref_to_digit(&r.port_from) {
+                    let refs = &self.rules[usize::from(v - 1)].port_from;
+                    r.port_from = if refs != "ANY" {
+                        refs.to_string()
+                    } else {
+                        e.src_port.to_string()
+                    };
+                }
+                if let Ok(v) = utils::ref_to_digit(&r.port_to) {
+                    let refs = &self.rules[usize::from(v - 1)].port_to;
+                    r.port_to = if refs != "ANY" {
+                        refs.to_string()
+                    } else {
+                        e.dst_port.to_string()
+                    };
+                }
+
+                // references in custom data
+                if let Ok(v) = utils::ref_to_digit(&r.custom_data1) {
+                    let refs = &self.rules[usize::from(v - 1)].custom_data1;
+                    r.custom_data1 = if refs != "ANY" {
+                        refs.to_string()
+                    } else {
+                        e.custom_data1.clone()
+                    };
+                }
+                if let Ok(v) = utils::ref_to_digit(&r.custom_data2) {
+                    let refs = &self.rules[usize::from(v - 1)].custom_data2;
+                    r.custom_data2 = if refs != "ANY" {
+                        refs.to_string()
+                    } else {
+                        e.custom_data2.clone()
+                    };
+                }
+                if let Ok(v) = utils::ref_to_digit(&r.custom_data3) {
+                    let refs = &self.rules[usize::from(v - 1)].custom_data3;
+                    r.custom_data3 = if refs != "ANY" {
+                        refs.to_string()
+                    } else {
+                        e.custom_data3.clone()
+                    };
+                }
+            }
+            result.push(r);
+        }
+        Ok(result)
+    }
 }
 
 fn validate_rules(rules: &Vec<rule::DirectiveRule>) -> Result<()> {

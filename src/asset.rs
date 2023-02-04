@@ -30,6 +30,25 @@ pub struct NetworkAssets {
 }
 
 impl NetworkAssets {
+    pub fn from_str(s: String) -> Result<NetworkAssets> {
+        let mut result = NetworkAssets { assets: vec![], whitelist: vec![], home_net: vec![] };
+        let loaded: NetworkAssets = serde_json::from_str(&s)?;
+        for a in loaded.assets {
+            validate_asset(&a)?;
+            result.assets.push(a.clone());
+            if a.whitelisted {
+                result.whitelist.push(a.cidr);
+            } else {
+                result.home_net.push(a.cidr);
+            }
+        }
+        if result.assets.is_empty() {
+            return Err(anyhow!("cannot load any asset".to_string()));
+        } else {
+            info!("{} assets found and loaded", result.assets.len());
+        }
+        Ok(result)
+    }
     pub fn new(test_env: bool) -> Result<NetworkAssets> {
         let cfg_dir = utils::config_dir(test_env)?;
         let glob_pattern = cfg_dir.to_string_lossy().to_string() + "/" + ASSETS_GLOB;
@@ -37,16 +56,10 @@ impl NetworkAssets {
         for file_path in glob(&glob_pattern)?.flatten() {
             info!("reading {:?}", file_path);
             let s = fs::read_to_string(file_path)?;
-            let loaded: NetworkAssets = serde_json::from_str(&s)?;
-            for a in loaded.assets {
-                validate_asset(&a)?;
-                result.assets.push(a.clone());
-                if a.whitelisted {
-                    result.whitelist.push(a.cidr);
-                } else {
-                    result.home_net.push(a.cidr);
-                }
-            }
+            let mut r = NetworkAssets::from_str(s)?;
+            result.assets.append(&mut r.assets);
+            result.whitelist.append(&mut r.whitelist);
+            result.home_net.append(&mut r.home_net);
         }
         if result.assets.is_empty() {
             return Err(anyhow!("cannot load any asset".to_string()));
@@ -71,19 +84,7 @@ impl NetworkAssets {
         }
         return false;
     }
-    pub fn get_name(&self, ip: &IpAddr) -> Result<String, String> {
-        let asset = self.assets
-            .clone()
-            .into_iter()
-            .filter(|n| n.cidr.contains(&ip))
-            .filter(|n| n.cidr.is_host_address())
-            .take(1)
-            .collect::<Vec<NetworkAsset>>();
-        if asset.is_empty() {
-            return Err(format!("cannot get the asset name for {}", ip));
-        }
-        Ok(asset[0].name.clone())
-    }
+
     pub fn get_value(&self, ip: &IpAddr) -> u8 {
         self.assets
             .iter()
@@ -103,6 +104,22 @@ impl NetworkAssets {
         } else {
             Some(networks)
         }
+    }
+
+    // not used on backend
+    #[allow(dead_code)]
+    pub fn get_name(&self, ip: &IpAddr) -> Result<String, String> {
+        let asset = self.assets
+            .clone()
+            .into_iter()
+            .filter(|n| n.cidr.contains(&ip))
+            .filter(|n| n.cidr.is_host_address())
+            .take(1)
+            .collect::<Vec<NetworkAsset>>();
+        if asset.is_empty() {
+            return Err(format!("cannot get the asset name for {}", ip));
+        }
+        Ok(asset[0].name.clone())
     }
 }
 

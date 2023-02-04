@@ -39,7 +39,7 @@
           "port_to": "ANY",
           "protocol": "ICMP",
           "reliability": 6,
-          "timeout": 600
+          "timeout": 30
         },
         {
           "name": "ICMP Ping",
@@ -49,14 +49,14 @@
           "plugin_sid": [
             2100408
           ],
-          "occurrence": 10000,
+          "occurrence": 3,
           "from": ":1",
           "to": "ANY",
           "port_from": "ANY",
           "port_to": "ANY",
           "protocol": "ICMP",
           "reliability": 10,
-          "timeout": 3600
+          "timeout": 50
         }
       ]
     }
