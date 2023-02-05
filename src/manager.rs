@@ -9,6 +9,7 @@ use crate::{
     event::NormalizedEvent,
     rule,
     backlog::{ self, Backlog, BacklogState },
+    intel::IntelPlugin,
 };
 
 use anyhow::Result;
@@ -18,6 +19,8 @@ pub struct ManagerOpt {
     pub test_env: bool,
     pub directives: Vec<Directive>,
     pub assets: NetworkAssets,
+    pub intels: Arc<IntelPlugin>,
+    pub intel_private_ip: bool,
     pub hold_duration: u8,
     pub max_delay: i64,
     pub min_alarm_lifetime: i64,
@@ -46,6 +49,7 @@ impl Manager {
         let mut set = JoinSet::new();
         for directive in self.option.directives {
             let assets = self.option.assets.clone();
+            let intels = self.option.intels.clone();
             let sender = self.option.publisher.clone();
             let default_status = self.option.default_status.clone();
             let default_tag = self.option.default_tag.clone();
@@ -76,7 +80,6 @@ impl Manager {
                     let mut match_found = false;
 
                     // keep this lock for the entire event recv() loop so the next event will get updated backlogs
-                    // the problem is async lock is yielding and letting recv take new event
                     let mut backlogs = locked_backlogs.write().await;
                     backlogs.retain(|x| {
                         let s = x.state.read();
@@ -106,11 +109,13 @@ impl Manager {
                         let opt = backlog::BacklogOpt {
                             asset: assets.clone(),
                             bp_tx: bp_sender.clone(),
+                            intel: intels.clone(),
                             min_alarm_lifetime: self.option.min_alarm_lifetime,
                             default_status: default_status.clone(),
                             default_tag: default_tag.clone(),
                             med_risk_min: self.option.med_risk_min,
                             med_risk_max: self.option.med_risk_max,
+                            intel_private_ip: self.option.intel_private_ip,
                             directive: &directive,
                             event: &event,
                         };

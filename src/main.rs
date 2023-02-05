@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::Duration;
 use clap::{ Parser, arg, command, Subcommand, Args };
 use tokio::task;
@@ -16,7 +18,7 @@ mod asset;
 mod worker;
 mod manager;
 mod backlog;
-mod xcorrelator;
+mod intel;
 
 #[derive(Parser)]
 #[command(
@@ -183,10 +185,15 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         ::load_directives(test_env)
         .map_err(|e| log_startup_err("loading directives", e))?;
 
+    let intels = Arc::new(
+        intel::load_intel(test_env).map_err(|e| log_startup_err("loading intels", e))?
+    );
+
     let opt = ManagerOpt {
         test_env,
         directives,
         assets,
+        intels,
         hold_duration: sargs.hold_duration,
         max_delay,
         min_alarm_lifetime,
@@ -196,6 +203,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         med_risk_min: sargs.med_risk_min,
         default_status: sargs.status[0].clone(),
         default_tag: sargs.tags[0].clone(),
+        intel_private_ip: sargs.intel_private_ip,
     };
     let manager = manager::Manager::new(opt).map_err(|e| log_startup_err("loading manager", e))?;
     let manager_handle = task::spawn(async move { manager.listen().await });

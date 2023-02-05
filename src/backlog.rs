@@ -1,4 +1,4 @@
-use std::{ net::IpAddr, collections::HashSet, ops::Deref, time::Duration };
+use std::{ net::IpAddr, collections::HashSet, ops::Deref, time::Duration, sync::Arc };
 use chrono::{ DateTime, Utc };
 use serde::Deserialize;
 use serde_derive::Serialize;
@@ -16,6 +16,7 @@ use crate::{
     directive::Directive,
     asset::NetworkAssets,
     utils,
+    intel::{ IntelPlugin, IntelResult },
 };
 use anyhow::{ Result, Context, anyhow };
 
@@ -61,6 +62,8 @@ pub struct Backlog {
     pub dst_ips: RwLock<HashSet<IpAddr>>,
     pub networks: RwLock<HashSet<String>>,
     #[serde(skip_serializing_if = "is_locked_data_empty")]
+    pub intel_hits: RwLock<HashSet<IntelResult>>,
+    #[serde(skip_serializing_if = "is_locked_data_empty")]
     pub custom_data: RwLock<HashSet<CustomData>>,
     #[serde(skip_serializing, skip_deserializing)]
     pub current_stage: RwLock<u8>,
@@ -92,10 +95,14 @@ pub struct Backlog {
     pub med_risk_min: u8,
     #[serde(skip_serializing, skip_deserializing)]
     pub med_risk_max: u8,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub intels: Option<IntelPlugin>,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub intel_private_ip: bool,
 }
 
 // This is only used for serialize
-fn is_locked_data_empty(s: &RwLock<HashSet<CustomData>>) -> bool {
+fn is_locked_data_empty<T>(s: &RwLock<HashSet<T>>) -> bool {
     let r = s.read();
     r.is_empty()
 }
@@ -119,6 +126,7 @@ impl Default for DeleteChannel {
 pub struct BacklogOpt<'a> {
     pub directive: &'a Directive,
     pub asset: NetworkAssets,
+    pub intel: Arc<IntelPlugin>,
     pub event: &'a NormalizedEvent,
     pub bp_tx: Sender<bool>,
     pub min_alarm_lifetime: i64,
@@ -126,6 +134,7 @@ pub struct BacklogOpt<'a> {
     pub default_tag: String,
     pub med_risk_min: u8,
     pub med_risk_max: u8,
+    pub intel_private_ip: bool,
 }
 impl Backlog {
     pub async fn new(o: BacklogOpt<'_>) -> Result<Self> {
@@ -136,6 +145,7 @@ impl Backlog {
             category: o.directive.category.clone(),
             status: o.default_status,
             tag: o.default_tag,
+            intel_private_ip: o.intel_private_ip,
 
             rules: o.directive
                 .init_backlog_rules(o.event)
@@ -623,6 +633,24 @@ impl Backlog {
         Ok(())
     }
 
+    async fn check_intel(&self) -> Result<()> {
+        let intels = self.intels.as_ref().ok_or_else(|| anyhow!("intels is none"))?;
+        let mut targets = HashSet::new();
+        for s in [&self.src_ips, &self.dst_ips] {
+            let r = s.read();
+            targets.extend(r.clone());
+        }
+        let res = intels.run_checkers(self.intel_private_ip, targets)?;
+        let mut w = self.intel_hits.write();
+        if res == *w {
+            debug!(self.id, "no new intel match found");
+            return Ok(());
+        }
+        let difference = res.difference(&w);
+        debug!(self.id, "found {} new intel matches", difference.count());
+        *w = res;
+        Ok(())
+    }
     async fn update_alarm(&self, check_intvuln: bool) -> Result<()> {
         if *self.risk.read() == 0 {
             trace!(self.id, "risk is zero, skip updating alarm");
@@ -631,6 +659,10 @@ impl Backlog {
         debug!(self.id, check_intvuln, "updating alarm");
         self.set_created_time();
         self.update_networks();
+
+        if check_intvuln && self.intels.is_some() {
+            self.check_intel().await?;
+        }
 
         let s = serde_json::to_string(&self)? + "\n";
         let mut binding = self.alarm_writer.write().await;

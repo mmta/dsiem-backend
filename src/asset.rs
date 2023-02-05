@@ -74,7 +74,7 @@ impl NetworkAssets {
                 return true;
             }
         }
-        return false;
+        false
     }
     pub fn is_whitelisted(&self, ip: &IpAddr) -> bool {
         for net in &self.whitelist {
@@ -82,7 +82,7 @@ impl NetworkAssets {
                 return true;
             }
         }
-        return false;
+        false
     }
 
     pub fn get_value(&self, ip: &IpAddr) -> u8 {
@@ -130,7 +130,6 @@ fn validate_asset(asset: &NetworkAsset) -> Result<()> {
     if asset.name.is_empty() {
         return Err(anyhow!("asset name cannot be empty"));
     }
-
     Ok(())
 }
 
