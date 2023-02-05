@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use futures::StreamExt;
-use parking_lot::Mutex;
 use tokio::{ sync::{ mpsc::Sender as MpscSender, broadcast::{ Sender, self }, RwLock }, task };
 use tracing::{ info, debug, error };
 
@@ -60,7 +58,7 @@ impl Manager {
                 let (sid_pairs, taxo_pairs) = rule::get_quick_check_pairs(&directive.rules);
                 let contains_pluginrule = !sid_pairs.is_empty();
                 let contains_taxorule = !taxo_pairs.is_empty();
-                let mut backlogs: Vec<Arc<RwLock<Backlog>>> = vec![];
+                let locked_backlogs: RwLock<Vec<Arc<Backlog>>> = RwLock::new(vec![]);
                 let mut upstream = sender.subscribe();
                 let (tx, _) = broadcast::channel(128);
                 debug!(directive.id, "listening for event");
@@ -75,51 +73,32 @@ impl Manager {
                         continue;
                     }
 
-                    let match_found = Mutex::new(false);
-                    backlogs = futures::stream
-                        ::iter(backlogs)
-                        .filter_map(|x| async {
-                            let binding = x.clone();
-                            let reader = binding.read().await;
-                            let l = reader.state.read();
-                            let result = if *l == BacklogState::Running { Some(x) } else { None };
-                            let mut mu_found = match_found.lock();
-                            if result.is_some() && !*mu_found {
-                                if let Ok(rule) = reader.current_rule() {
-                                    if rule.does_event_match(&assets, &event, false) {
-                                        *mu_found = true;
-                                    }
-                                }
-                            }
-                            result
-                        })
-                        .collect().await;
+                    let mut match_found = false;
 
+                    // keep this lock for the entire event recv() loop so the next event will get updated backlogs
+                    // the problem is async lock is yielding and letting recv take new event
+                    let mut backlogs = locked_backlogs.write().await;
+                    backlogs.retain(|x| {
+                        let s = x.state.read();
+                        *s == BacklogState::Created || *s == BacklogState::Running
+                    });
                     debug!(directive.id, "total backlogs {}", backlogs.len());
-                    for locked in backlogs.iter() {
-                        let b = locked.read().await;
-                        let res = b.current_rule();
-                        match res {
-                            Ok(v) => {
-                                if v.does_event_match(&assets, &event, false) {
-                                    // match_found = true
-                                    break;
-                                } else {
-                                    debug!(
-                                        directive.id,
-                                        event.id,
-                                        "event doesnt match current rule"
-                                    );
-                                }
+
+                    for b in backlogs.iter() {
+                        if let Ok(rule) = b.current_rule() {
+                            if rule.does_event_match(&assets, &event, false) {
+                                match_found = true;
+                                break;
+                            } else {
+                                debug!(directive.id, event.id, "event doesnt match current rule");
                             }
-                            _ => {
-                                error!(directive.id, b.id, "{}", res.unwrap_err());
-                                continue;
-                            }
+                        } else {
+                            error!(directive.id, b.id, "cannot get current rule");
+                            continue;
                         }
                     }
 
-                    if match_found.into_inner() {
+                    if match_found {
                         debug!(directive.id, event.id, "found existing backlog");
                     } else {
                         // new backlog
@@ -139,12 +118,12 @@ impl Manager {
                         if res.is_err() {
                             error!(directive.id, "cannot create backlog: {}", res.unwrap_err());
                         } else if let Ok(b) = res {
-                            let locked = Arc::new(RwLock::new(b));
+                            let locked = Arc::new(b);
                             let clone = Arc::clone(&locked);
                             backlogs.push(locked);
                             let rx = tx.subscribe();
                             let _detached = task::spawn(async move {
-                                let w = clone.read().await;
+                                let w = clone;
                                 if let Err(e) = w.start(rx, self.option.max_delay).await {
                                     error!(
                                         directive.id,

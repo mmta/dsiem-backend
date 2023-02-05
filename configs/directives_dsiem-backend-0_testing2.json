@@ -38,7 +38,7 @@
           "port_from": "ANY",
           "port_to": "ANY",
           "protocol": "ICMP",
-          "reliability": 6,
+          "reliability": 8,
           "timeout": 30
         },
         {
@@ -49,14 +49,14 @@
           "plugin_sid": [
             2100408
           ],
-          "occurrence": 3,
+          "occurrence": 30,
           "from": ":1",
           "to": "ANY",
           "port_from": "ANY",
           "port_to": "ANY",
           "protocol": "ICMP",
           "reliability": 10,
-          "timeout": 50
+          "timeout": 180
         }
       ]
     }

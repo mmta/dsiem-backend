@@ -14,8 +14,8 @@ use crate::{
     event::NormalizedEvent,
     rule::DirectiveRule,
     directive::Directive,
-    utils::{ self, generate_id },
     asset::NetworkAssets,
+    utils,
 };
 use anyhow::{ Result, Context, anyhow };
 
@@ -35,15 +35,16 @@ pub struct SiemAlarmEvent {
     event_id: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub enum BacklogState {
+    #[default]
     Created,
     Running,
     Stopped,
 }
 
 // serialize should only for alarm fields
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 pub struct Backlog {
     pub id: String,
     pub title: String,
@@ -82,7 +83,7 @@ pub struct Backlog {
     #[serde(skip_serializing, skip_deserializing)]
     backpressure_tx: Option<Sender<bool>>,
     #[serde(skip_serializing, skip_deserializing)]
-    delete_channel: (tokio::sync::watch::Sender<bool>, tokio::sync::watch::Receiver<bool>),
+    delete_channel: DeleteChannel,
     #[serde(skip_serializing, skip_deserializing)]
     pub state: RwLock<BacklogState>,
     #[serde(skip_serializing, skip_deserializing)]
@@ -99,40 +100,18 @@ fn is_locked_data_empty(s: &RwLock<HashSet<CustomData>>) -> bool {
     r.is_empty()
 }
 
-impl Default for Backlog {
+#[derive(Debug)]
+struct DeleteChannel {
+    tx: tokio::sync::watch::Sender<bool>,
+    rx: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Default for DeleteChannel {
     fn default() -> Self {
         let (tx, rx) = watch::channel(false);
-        Backlog {
-            id: generate_id(),
-            title: "".to_string(),
-            status: "".to_string(),
-            tag: "".to_string(),
-            kingdom: "".to_string(),
-            category: "".to_string(),
-            created_time: RwLock::new(0),
-            update_time: RwLock::new(0),
-            risk: RwLock::new(0),
-            risk_class: RwLock::new("".to_string()),
-            rules: vec![],
-            current_stage: RwLock::new(1),
-            highest_stage: 1,
-            src_ips: RwLock::new(vec![].into_iter().collect()),
-            dst_ips: RwLock::new(vec![].into_iter().collect()),
-            networks: RwLock::new(vec![].into_iter().collect()),
-            custom_data: RwLock::new(vec![].into_iter().collect()),
-            last_srcport: RwLock::new(0),
-            last_dstport: RwLock::new(0),
-            all_rules_always_active: false,
-            priority: 1,
-            assets: NetworkAssets::default(),
-            alarm_events_writer: TokioRwLock::new(None),
-            alarm_writer: TokioRwLock::new(None),
-            backpressure_tx: None,
-            delete_channel: (tx, rx),
-            state: RwLock::new(BacklogState::Created),
-            min_alarm_lifetime: 0,
-            med_risk_min: 0,
-            med_risk_max: 0,
+        DeleteChannel {
+            tx,
+            rx,
         }
     }
 }
@@ -151,6 +130,7 @@ pub struct BacklogOpt<'a> {
 impl Backlog {
     pub async fn new(o: BacklogOpt<'_>) -> Result<Self> {
         let mut backlog = Backlog {
+            id: utils::generate_id(),
             title: o.directive.name.clone(),
             kingdom: o.directive.kingdom.clone(),
             category: o.directive.category.clone(),
@@ -169,6 +149,7 @@ impl Backlog {
             min_alarm_lifetime: o.min_alarm_lifetime,
             med_risk_min: o.med_risk_min,
             med_risk_max: o.med_risk_max,
+            state: RwLock::new(BacklogState::Created),
             ..Default::default()
         };
         backlog.highest_stage = backlog.rules
@@ -179,14 +160,45 @@ impl Backlog {
         let log_dir = utils::log_dir(false).unwrap();
         fs::create_dir_all(&log_dir).await?;
         let file = OpenOptions::new()
-            .write(true)
             .create(true)
+            .append(true)
             .open(log_dir.join(ALARM_EVENT_LOG)).await?;
         backlog.alarm_events_writer = TokioRwLock::new(Some(file));
-        let file = OpenOptions::new().write(true).create(true).open(log_dir.join(ALARM_LOG)).await?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_dir.join(ALARM_LOG)).await?;
         backlog.alarm_writer = TokioRwLock::new(Some(file));
 
         info!(directive_id = o.directive.id, backlog.id, "new backlog created");
+
+        // debugging
+        for r in o.directive.rules.iter() {
+            let l = r.event_ids.read();
+            debug!(
+                backlog.id,
+                "referenced rule stage {} event_ids: {}/{}, from: {}, to: {}, start_time: {}",
+                r.stage,
+                l.len(),
+                r.occurrence,
+                r.from,
+                r.to,
+                *r.start_time.read()
+            );
+        }
+        for r in backlog.rules.iter() {
+            let l = r.event_ids.read();
+            debug!(
+                backlog.id,
+                "starting rule stage {} event_ids: {}/{}, from: {}, to: {}, start_time: {}",
+                r.stage,
+                l.len(),
+                r.occurrence,
+                r.from,
+                r.to,
+                *r.start_time.read()
+            );
+        }
 
         Ok(backlog)
     }
@@ -199,7 +211,7 @@ impl Backlog {
 
     pub async fn start(&self, mut rx: Receiver<NormalizedEvent>, max_delay: i64) -> Result<()> {
         let mut expiration_checker = interval(Duration::from_secs(10));
-        let mut delete_rx = self.delete_channel.1.clone();
+        let mut delete_rx = self.delete_channel.rx.clone();
         debug!(self.id, "enter running state");
         self.set_state(BacklogState::Running);
 
@@ -224,12 +236,12 @@ impl Backlog {
                 }
                },
                _ = delete_rx.changed() => {
+                self.set_state(BacklogState::Stopped);
                 debug!(self.id, "backlog delete signal received");
                 break
                },
             }
         }
-        self.set_state(BacklogState::Stopped);
         info!(self.id, "exited running state");
         Ok(())
     }
@@ -328,6 +340,7 @@ impl Backlog {
         // discard out of order event
         if !self.is_time_in_order(&event.timestamp) {
             warn!(self.id, event.id, "discarded out of order event");
+            return Ok(());
         }
 
         if self.is_under_pressure(event.rcvd_time, max_delay) {
@@ -345,7 +358,15 @@ impl Backlog {
     fn is_stage_reach_max_event_count(&self) -> Result<bool> {
         let curr_rule = self.current_rule()?;
         let reader = curr_rule.event_ids.read();
-        Ok(reader.len() >= curr_rule.occurrence)
+        let len = reader.len();
+        debug!(
+            self.id,
+            "current rule stage {} event count {}/{}",
+            curr_rule.stage,
+            len,
+            curr_rule.occurrence
+        );
+        Ok(len >= curr_rule.occurrence)
     }
 
     fn set_rule_status(&self, status: &str) -> Result<()> {
@@ -467,7 +488,7 @@ impl Backlog {
     }
 
     fn delete(&self) -> Result<()> {
-        self.delete_channel.0.send(true)?;
+        self.delete_channel.tx.send(true)?;
         Ok(())
     }
 
@@ -485,6 +506,17 @@ impl Backlog {
 
     async fn append_and_write_event(&self, event: &NormalizedEvent) -> Result<()> {
         let curr_rule = self.current_rule()?;
+        {
+            let ttl_events = curr_rule.event_ids.read().len();
+            debug!(
+                self.id,
+                event.id,
+                curr_rule.stage,
+                "appending event {}/{}",
+                ttl_events,
+                curr_rule.occurrence
+            );
+        }
         {
             let mut w = curr_rule.event_ids.write();
             w.insert(event.id.clone());

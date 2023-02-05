@@ -41,7 +41,9 @@ impl Directive {
     pub fn init_backlog_rules(&self, e: &NormalizedEvent) -> Result<Vec<DirectiveRule>> {
         let mut result = vec![];
         for (i, rule) in self.rules.iter().enumerate() {
-            let mut r = rule.clone();
+            let mut r = rule.clone().reset_arc_fields();
+            // all arc field must be recreated
+
             if i == 0 {
                 r.start_time = Arc::new(RwLock::new(e.timestamp.timestamp()));
 

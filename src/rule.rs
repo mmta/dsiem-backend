@@ -9,10 +9,11 @@ use tracing::{ warn, error };
 use crate::{ event::NormalizedEvent, asset::NetworkAssets };
 use anyhow::Result;
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub enum RuleType {
     PluginRule,
     TaxonomyRule,
+    #[default]
     UnsupportedType,
 }
 
@@ -37,7 +38,7 @@ impl<'de> serde::Deserialize<'de> for RuleType {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct DirectiveRule {
     pub name: String,
     pub stage: u8,
@@ -109,41 +110,6 @@ fn is_locked_string_empty(s: &Arc<RwLock<String>>) -> bool {
     r.is_empty()
 }
 
-impl Default for DirectiveRule {
-    fn default() -> Self {
-        DirectiveRule {
-            name: "".to_string(),
-            stage: 1,
-            plugin_id: 0,
-            plugin_sid: vec![],
-            product: vec![],
-            category: "".to_string(),
-            subcategory: vec![],
-            occurrence: 0,
-            from: "".to_string(),
-            to: "".to_string(),
-            rule_type: RuleType::UnsupportedType,
-            port_from: "".to_string(),
-            port_to: "".to_string(),
-            protocol: "".to_string(),
-            reliability: 0,
-            timeout: 0,
-            start_time: Arc::new(RwLock::new(0)),
-            end_time: Arc::new(RwLock::new(0)),
-            status: Arc::new(RwLock::new("".to_string())),
-            sticky_different: "".to_string(),
-            custom_data1: "".to_string(),
-            custom_label1: "".to_string(),
-            custom_data2: "".to_string(),
-            custom_label2: "".to_string(),
-            custom_data3: "".to_string(),
-            custom_label3: "".to_string(),
-            sticky_diffdata: Arc::new(RwLock::new(StickyDiffData::default())),
-            event_ids: Arc::new(RwLock::new(vec![].into_iter().collect())),
-        }
-    }
-}
-
 impl DirectiveRule {
     pub fn does_event_match(
         &self,
@@ -158,6 +124,15 @@ impl DirectiveRule {
         } else {
             false
         }
+    }
+
+    pub fn reset_arc_fields(mut self) -> Self {
+        self.start_time = Default::default();
+        self.end_time = Default::default();
+        self.status = Default::default();
+        self.sticky_diffdata = Default::default();
+        self.event_ids = Default::default();
+        self
     }
 }
 
