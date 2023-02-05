@@ -41,8 +41,8 @@ impl Directive {
     pub fn init_backlog_rules(&self, e: &NormalizedEvent) -> Result<Vec<DirectiveRule>> {
         let mut result = vec![];
         for (i, rule) in self.rules.iter().enumerate() {
+            // all arc fields must be reset
             let mut r = rule.clone().reset_arc_fields();
-            // all arc field must be recreated
 
             if i == 0 {
                 r.start_time = Arc::new(RwLock::new(e.timestamp.timestamp()));
@@ -132,7 +132,7 @@ fn validate_rules(rules: &Vec<rule::DirectiveRule>) -> Result<()> {
     let highest_stage = rules.iter().fold(std::u8::MIN, |a, b| a.max(b.stage));
     for r in rules {
         if r.stage == 0 {
-            return Err(anyhow!("rule stage cannot be zero".to_string()));
+            return Err(anyhow!("rule stage cannot be zero"));
         }
 
         for s in &stages {

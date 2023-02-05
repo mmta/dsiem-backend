@@ -73,11 +73,9 @@ impl Default for NormalizedEvent {
     }
 }
 
-/*
 impl NormalizedEvent {
     pub fn valid(&self) -> bool {
         (self.plugin_id != 0 && self.plugin_sid != 0) ||
             (!self.product.is_empty() && !self.category.is_empty())
     }
 }
-*/

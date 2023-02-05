@@ -4,11 +4,13 @@ use anyhow::Result;
 use serde::{ Deserialize, Serialize };
 use tracing::{ info, trace };
 use glob::glob;
+use async_trait::async_trait;
 
 use crate::utils;
 mod wise;
 
 const INTEL_GLOB: &str = "intel_*.json";
+const INTEL_MAX_SECONDS: u64 = 10;
 
 #[derive(Deserialize, Clone)]
 pub struct IntelSource {
@@ -31,15 +33,17 @@ pub struct IntelResult {
     pub term: String,
     pub result: String,
 }
+
+#[async_trait]
 pub trait IntelChecker: Send + Sync {
-    fn check_ip(&self, ip: IpAddr) -> Result<IntelResult>;
+    async fn check_ip(&self, ip: IpAddr) -> Result<HashSet<IntelResult>>;
     fn initialize(&mut self, config: String) -> Result<()>;
 }
 
 pub struct IntelPlugin {
     pub checkers: Arc<Vec<Box<dyn IntelChecker>>>,
     pub intel_sources: Vec<IntelSource>,
-    cache: Cache<IpAddr, IntelResult>,
+    cache: Cache<IpAddr, HashSet<IntelResult>>,
 }
 
 impl fmt::Debug for IntelPlugin {
@@ -49,7 +53,7 @@ impl fmt::Debug for IntelPlugin {
 }
 
 impl IntelPlugin {
-    pub fn run_checkers(
+    pub async fn run_checkers(
         &self,
         check_private_ip: bool,
         targets: HashSet<IpAddr>
@@ -65,11 +69,14 @@ impl IntelPlugin {
                     trace!("returning intel result from cache for {}", ip);
                     v
                 } else {
-                    let v = c.check_ip(*ip)?;
+                    let v = tokio::time::timeout(
+                        Duration::from_secs(INTEL_MAX_SECONDS),
+                        c.check_ip(*ip)
+                    ).await??;
                     trace!("obtained intel result for {}", ip);
                     v
                 };
-                set.insert(res.clone());
+                set.extend(res.clone());
                 self.cache.insert(*ip, res);
             }
         }

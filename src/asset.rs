@@ -43,7 +43,7 @@ impl NetworkAssets {
             }
         }
         if result.assets.is_empty() {
-            return Err(anyhow!("cannot load any asset".to_string()));
+            return Err(anyhow!("cannot load any asset"));
         } else {
             info!("{} assets found and loaded", result.assets.len());
         }
@@ -60,11 +60,6 @@ impl NetworkAssets {
             result.assets.append(&mut r.assets);
             result.whitelist.append(&mut r.whitelist);
             result.home_net.append(&mut r.home_net);
-        }
-        if result.assets.is_empty() {
-            return Err(anyhow!("cannot load any asset".to_string()));
-        } else {
-            info!("{} assets found and loaded", result.assets.len());
         }
         Ok(result)
     }
@@ -88,7 +83,7 @@ impl NetworkAssets {
     pub fn get_value(&self, ip: &IpAddr) -> u8 {
         self.assets
             .iter()
-            .filter(|n| n.cidr.contains(&ip))
+            .filter(|n| n.cidr.contains(ip))
             .max_by_key(|x| x.value)
             .map(|x| x.value)
             .unwrap_or_default()
@@ -96,7 +91,7 @@ impl NetworkAssets {
     pub fn get_asset_networks(&self, ip: &IpAddr) -> Option<Vec<String>> {
         let networks = self.home_net
             .iter()
-            .filter(|n| n.contains(&ip) && !n.is_host_address())
+            .filter(|n| n.contains(ip) && !n.is_host_address())
             .map(|v| v.to_string())
             .collect::<Vec<String>>();
         if networks.is_empty() {
@@ -112,7 +107,7 @@ impl NetworkAssets {
         let asset = self.assets
             .clone()
             .into_iter()
-            .filter(|n| n.cidr.contains(&ip))
+            .filter(|n| n.cidr.contains(ip))
             .filter(|n| n.cidr.is_host_address())
             .take(1)
             .collect::<Vec<NetworkAsset>>();

@@ -33,6 +33,7 @@ tracing-appender = "0.2.2"
 parking_lot = { version = "0.12.1", features = ["serde"], optional = false, default-features = false }
 moka = "0.9.6"
 ip_rfc = "0.1.0"
+async-trait = "0.1.64"
 
 [dev-dependencies]
 table-test = "0.2.1"

@@ -78,13 +78,13 @@ pub struct Backlog {
     #[serde(skip_serializing, skip_deserializing)]
     pub priority: u8, // copied from directive
     #[serde(skip_serializing, skip_deserializing)]
-    pub assets: NetworkAssets, // copied from asset
+    pub assets: Arc<NetworkAssets>,
     #[serde(skip_serializing, skip_deserializing)]
     alarm_events_writer: TokioRwLock<Option<File>>,
     #[serde(skip_serializing, skip_deserializing)]
     alarm_writer: TokioRwLock<Option<File>>,
     #[serde(skip_serializing, skip_deserializing)]
-    backpressure_tx: Option<Sender<bool>>,
+    backpressure_tx: Option<Sender<()>>,
     #[serde(skip_serializing, skip_deserializing)]
     delete_channel: DeleteChannel,
     #[serde(skip_serializing, skip_deserializing)]
@@ -96,7 +96,7 @@ pub struct Backlog {
     #[serde(skip_serializing, skip_deserializing)]
     pub med_risk_max: u8,
     #[serde(skip_serializing, skip_deserializing)]
-    pub intels: Option<IntelPlugin>,
+    pub intels: Option<Arc<IntelPlugin>>,
     #[serde(skip_serializing, skip_deserializing)]
     pub intel_private_ip: bool,
 }
@@ -125,10 +125,10 @@ impl Default for DeleteChannel {
 
 pub struct BacklogOpt<'a> {
     pub directive: &'a Directive,
-    pub asset: NetworkAssets,
+    pub asset: Arc<NetworkAssets>,
     pub intel: Arc<IntelPlugin>,
     pub event: &'a NormalizedEvent,
-    pub bp_tx: Sender<bool>,
+    pub bp_tx: Sender<()>,
     pub min_alarm_lifetime: i64,
     pub default_status: String,
     pub default_tag: String,
@@ -180,36 +180,9 @@ impl Backlog {
             .open(log_dir.join(ALARM_LOG)).await?;
         backlog.alarm_writer = TokioRwLock::new(Some(file));
 
+        backlog.intels = Some(o.intel);
+
         info!(directive_id = o.directive.id, backlog.id, "new backlog created");
-
-        // debugging
-        for r in o.directive.rules.iter() {
-            let l = r.event_ids.read();
-            debug!(
-                backlog.id,
-                "referenced rule stage {} event_ids: {}/{}, from: {}, to: {}, start_time: {}",
-                r.stage,
-                l.len(),
-                r.occurrence,
-                r.from,
-                r.to,
-                *r.start_time.read()
-            );
-        }
-        for r in backlog.rules.iter() {
-            let l = r.event_ids.read();
-            debug!(
-                backlog.id,
-                "starting rule stage {} event_ids: {}/{}, from: {}, to: {}, start_time: {}",
-                r.stage,
-                l.len(),
-                r.occurrence,
-                r.from,
-                r.to,
-                *r.start_time.read()
-            );
-        }
-
         Ok(backlog)
     }
 
@@ -347,7 +320,6 @@ impl Backlog {
             }
         }
 
-        // discard out of order event
         if !self.is_time_in_order(&event.timestamp) {
             warn!(self.id, event.id, "discarded out of order event");
             return Ok(());
@@ -356,7 +328,7 @@ impl Backlog {
         if self.is_under_pressure(event.rcvd_time, max_delay) {
             warn!(self.id, event.id, "is under pressure");
             if let Some(tx) = &self.backpressure_tx {
-                if let Err(e) = tx.try_send(true) {
+                if let Err(e) = tx.try_send(()) {
                     warn!(self.id, event.id, "error sending under pressure signal: {}", e);
                 }
             }
@@ -633,24 +605,6 @@ impl Backlog {
         Ok(())
     }
 
-    async fn check_intel(&self) -> Result<()> {
-        let intels = self.intels.as_ref().ok_or_else(|| anyhow!("intels is none"))?;
-        let mut targets = HashSet::new();
-        for s in [&self.src_ips, &self.dst_ips] {
-            let r = s.read();
-            targets.extend(r.clone());
-        }
-        let res = intels.run_checkers(self.intel_private_ip, targets)?;
-        let mut w = self.intel_hits.write();
-        if res == *w {
-            debug!(self.id, "no new intel match found");
-            return Ok(());
-        }
-        let difference = res.difference(&w);
-        debug!(self.id, "found {} new intel matches", difference.count());
-        *w = res;
-        Ok(())
-    }
     async fn update_alarm(&self, check_intvuln: bool) -> Result<()> {
         if *self.risk.read() == 0 {
             trace!(self.id, "risk is zero, skip updating alarm");
@@ -661,7 +615,14 @@ impl Backlog {
         self.update_networks();
 
         if check_intvuln && self.intels.is_some() {
-            self.check_intel().await?;
+            debug!(self.id, "querying threat intel plugins");
+            // dont fail alarm update if there's intel check err
+            _ = self
+                .check_intel().await
+                .map_err(|e| { error!(self.id, "intel check error: {:?}", e) });
+        } else {
+            let is_intels = self.intels.is_some();
+            debug!(self.id, check_intvuln, is_intels, "not checking intel");
         }
 
         let s = serde_json::to_string(&self)? + "\n";
@@ -670,17 +631,24 @@ impl Backlog {
         w.write_all(s.as_bytes()).await?;
 
         Ok(())
+    }
 
-        /* postponed
-        if xc.IntelEnabled && checkIntelVuln {
-            // do intel check in the background
-            asyncIntelCheck(a, connID, intelCheckPrivateIP, tx)
+    async fn check_intel(&self) -> Result<()> {
+        let intels = self.intels.as_ref().ok_or_else(|| anyhow!("intels is none"))?;
+        let mut targets = HashSet::new();
+        for s in [&self.src_ips, &self.dst_ips] {
+            let r = s.read();
+            targets.extend(r.clone());
         }
-    
-        if xc.VulnEnabled && checkIntelVuln {
-            // do vuln check in the background
-            asyncVulnCheck(a, lastSrcPort, lastDstPort, connID, tx)
+        let res = intels.run_checkers(self.intel_private_ip, targets).await?;
+        let mut w = self.intel_hits.write();
+        if res == *w {
+            debug!(self.id, "no new intel match found");
+            return Ok(());
         }
-        */
+        let difference = res.difference(&w);
+        debug!(self.id, "found {} new intel matches", difference.count());
+        *w = res;
+        Ok(())
     }
 }

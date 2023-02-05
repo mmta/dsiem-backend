@@ -4,7 +4,7 @@ use chrono::Duration;
 use clap::{ Parser, arg, command, Subcommand, Args };
 use tokio::task;
 use tracing::{ info, error, debug };
-use anyhow::{ Result, Error, Context, anyhow };
+use anyhow::{ Result, Error, anyhow };
 use tokio::sync::{ broadcast, mpsc, oneshot };
 
 use crate::manager::ManagerOpt;
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
 }
 
 fn log_startup_err(context: &str, err: Error) -> Error {
-    error!("error {}: {}", context, err.to_string());
+    error!("error {}: {:?}", context, err);
     err
 }
 
@@ -158,29 +158,34 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     }
 
     let (event_tx, _) = broadcast::channel(sargs.max_queue);
-    let (bp_tx, bp_rx) = mpsc::channel::<bool>(128);
+    let (bp_tx, bp_rx) = mpsc::channel::<()>(128);
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     let event_tx_clone = event_tx.clone();
 
-    let assets = asset::NetworkAssets
-        ::new(test_env)
-        .map_err(|e| log_startup_err("loading assets", e))?;
+    let assets = Arc::new(
+        asset::NetworkAssets::new(test_env).map_err(|e| log_startup_err("loading assets", e))?
+    );
 
     let worker_handle = task::spawn({
         let assets = assets.clone();
         async move {
-            worker::start_worker(
-                sargs.frontend,
-                sargs.msq,
-                sargs.node,
+            let opt = worker::WorkerOpt {
                 event_tx,
                 bp_rx,
                 ready_tx,
-                &assets
-            ).await
+                assets,
+                frontend_url: sargs.frontend,
+                nats_url: sargs.msq,
+                node_name: sargs.node,
+                hold_duration: sargs.hold_duration,
+            };
+            worker::start_worker(opt).await.map_err(|e| {
+                error!("{:?}", e);
+                e
+            })
         }
     });
-    ready_rx.await.context("initial worker setup process failed")?;
+    ready_rx.await?;
     let directives = directive
         ::load_directives(test_env)
         .map_err(|e| log_startup_err("loading directives", e))?;
@@ -194,7 +199,6 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         directives,
         assets,
         intels,
-        hold_duration: sargs.hold_duration,
         max_delay,
         min_alarm_lifetime,
         backpressure_tx: bp_tx,
@@ -206,7 +210,10 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         intel_private_ip: sargs.intel_private_ip,
     };
     let manager = manager::Manager::new(opt).map_err(|e| log_startup_err("loading manager", e))?;
-    let manager_handle = task::spawn(async move { manager.listen().await });
+    let manager_handle = task::spawn(async { manager.listen().await.map_err(|e| {
+            error!("{:?}", e);
+            e
+        }) });
     let (worker_res, manager_res) = tokio::join!(worker_handle, manager_handle);
     debug!("about to get result");
     worker_res??;
