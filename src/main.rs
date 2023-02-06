@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::Duration;
 use clap::{ Parser, arg, command, Subcommand, Args };
-use tokio::task;
+use tokio::{ task, time::timeout };
 use tracing::{ info, error, debug };
 use anyhow::{ Result, Error, anyhow };
 use tokio::sync::{ broadcast, mpsc, oneshot };
@@ -159,6 +159,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
 
     let (event_tx, _) = broadcast::channel(sargs.max_queue);
     let (bp_tx, bp_rx) = mpsc::channel::<()>(128);
+    let (cancel_tx, cancel_rx) = broadcast::channel::<()>(1);
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     let event_tx_clone = event_tx.clone();
 
@@ -173,6 +174,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
                 event_tx,
                 bp_rx,
                 ready_tx,
+                cancel_rx,
                 assets,
                 frontend_url: sargs.frontend,
                 nats_url: sargs.msq,
@@ -180,12 +182,18 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
                 hold_duration: sargs.hold_duration,
             };
             worker::start_worker(opt).await.map_err(|e| {
-                error!("{:?}", e);
+                error!("worker error: {:?}", e);
                 e
             })
         }
     });
-    ready_rx.await?;
+    timeout(std::time::Duration::from_secs(5), ready_rx).await.map_err(|_|
+        log_startup_err(
+            "waiting for worker",
+            anyhow!("5 seconds timeout occurred, likely wrong frontend or msq URLs")
+        )
+    )??;
+
     let directives = directive
         ::load_directives(test_env)
         .map_err(|e| log_startup_err("loading directives", e))?;
@@ -202,6 +210,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         max_delay,
         min_alarm_lifetime,
         backpressure_tx: bp_tx,
+        cancel_tx,
         publisher: event_tx_clone,
         med_risk_max: sargs.med_risk_max,
         med_risk_min: sargs.med_risk_min,

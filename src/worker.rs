@@ -2,7 +2,7 @@
 
 use std::{ fs::File, io::Write, sync::Arc, time::Duration };
 use futures::StreamExt;
-use tokio::{ sync::{ broadcast::Sender, oneshot, mpsc::Receiver }, time::interval };
+use tokio::{ sync::{ broadcast::{ Sender, self }, oneshot, mpsc }, time::interval };
 use std::str;
 
 use crate::{ utils, event::{ self, NormalizedEvent }, asset::NetworkAssets };
@@ -42,9 +42,10 @@ pub struct WorkerOpt {
     pub frontend_url: String,
     pub nats_url: String,
     pub node_name: String,
-    pub event_tx: Sender<event::NormalizedEvent>,
-    pub bp_rx: Receiver<()>,
+    pub event_tx: broadcast::Sender<NormalizedEvent>,
+    pub bp_rx: mpsc::Receiver<()>,
     pub ready_tx: oneshot::Sender<()>,
+    pub cancel_rx: broadcast::Receiver<()>,
     pub hold_duration: u8,
     pub assets: Arc<NetworkAssets>,
 }
@@ -56,7 +57,6 @@ pub async fn start_worker(mut opt: WorkerOpt) -> Result<()> {
         opt.frontend_url,
         opt.node_name
     ).await?;
-    opt.ready_tx.send(()).map_err(|_| anyhow!("cannot send ready signal"))?;
     let client = nats_client(&opt.nats_url).await?;
 
     let mut subscription = client
@@ -67,10 +67,12 @@ pub async fn start_worker(mut opt: WorkerOpt) -> Result<()> {
     let mut reset_bp = interval(Duration::from_secs(opt.hold_duration.into()));
     let mut bp_state = false;
 
+    info!("worker listening for new events");
+    opt.ready_tx.send(()).map_err(|_| anyhow!("cannot send ready signal"))?;
+
     loop {
         tokio::select! {
             Some(message) = subscription.next() => {
-                info!("worker listening for new events");
                 if let Ok(v) = str::from_utf8(&message.payload) {
                     if let Err(e) = handle_event_message(&opt.assets, &opt.event_tx, v) {
                         error!("{:?}", e);
@@ -102,9 +104,14 @@ pub async fn start_worker(mut opt: WorkerOpt) -> Result<()> {
                 } else {
                     info!("overload = true signal sent to frontend");
                 }                    
-            }
+            },
+            _ = opt.cancel_rx.recv() => {
+                info!("cancel signal received, exiting worker thread");
+                break;
+            },
         }
     }
+    Ok(())
 }
 
 fn handle_event_message(

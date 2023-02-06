@@ -581,8 +581,8 @@ mod test {
             }
         ];
         let mut event = NormalizedEvent {
-            product: "checkpoint".to_string(),
-            category: "firewall".to_string(),
+            product: "checkpoint".to_owned(),
+            category: "firewall".to_owned(),
             ..Default::default()
         };
         assert!(quick_check_taxo_rule(&pair, &event));

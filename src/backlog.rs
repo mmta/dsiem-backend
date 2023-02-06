@@ -111,6 +111,7 @@ fn is_locked_data_empty<T>(s: &RwLock<HashSet<T>>) -> bool {
 struct DeleteChannel {
     tx: tokio::sync::watch::Sender<bool>,
     rx: tokio::sync::watch::Receiver<bool>,
+    to_upstream_manager: Option<tokio::sync::mpsc::Sender<()>>,
 }
 
 impl Default for DeleteChannel {
@@ -119,7 +120,14 @@ impl Default for DeleteChannel {
         DeleteChannel {
             tx,
             rx,
+            to_upstream_manager: None,
         }
+    }
+}
+
+impl Drop for DeleteChannel {
+    fn drop(&mut self) {
+        trace!("Backlog's delete channel dropped!");
     }
 }
 
@@ -129,6 +137,7 @@ pub struct BacklogOpt<'a> {
     pub intel: Arc<IntelPlugin>,
     pub event: &'a NormalizedEvent,
     pub bp_tx: Sender<()>,
+    pub delete_tx: Sender<()>,
     pub min_alarm_lifetime: i64,
     pub default_status: String,
     pub default_tag: String,
@@ -136,6 +145,7 @@ pub struct BacklogOpt<'a> {
     pub med_risk_max: u8,
     pub intel_private_ip: bool,
 }
+
 impl Backlog {
     pub async fn new(o: BacklogOpt<'_>) -> Result<Self> {
         let mut backlog = Backlog {
@@ -162,6 +172,8 @@ impl Backlog {
             state: RwLock::new(BacklogState::Created),
             ..Default::default()
         };
+        backlog.delete_channel.to_upstream_manager = Some(o.delete_tx);
+
         backlog.highest_stage = backlog.rules
             .iter()
             .map(|v| v.stage)
@@ -213,6 +225,13 @@ impl Backlog {
                 }
                },
                Ok(event) = rx.recv() => {
+                {
+                    let r = self.state.read();
+                    if *r != BacklogState::Running {
+                        warn!(self.id, event.id, "event received, but backlog state is not running");
+                        continue;
+                    }    
+                }
                 debug!(self.id, event.id, "event received");
                 if let Err(e) = self.process_new_event(&event,  max_delay).await {
                     error!(self.id, event.id, "{}", e);
@@ -221,6 +240,11 @@ impl Backlog {
                _ = delete_rx.changed() => {
                 self.set_state(BacklogState::Stopped);
                 debug!(self.id, "backlog delete signal received");
+                if let Some(v) = &self.delete_channel.to_upstream_manager {
+                    if let Err(e) = v.send(()).await {
+                        debug!{self.id, "error notifying manager about backlog deletion: {:?}", e}
+                    }
+                };
                 break
                },
             }
