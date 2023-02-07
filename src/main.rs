@@ -197,10 +197,10 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
             })
         }
     });
-    timeout(std::time::Duration::from_secs(5), ready_rx).await.map_err(|_|
+    timeout(std::time::Duration::from_secs(10), ready_rx).await.map_err(|_|
         log_startup_err(
             "waiting for worker",
-            anyhow!("5 seconds timeout occurred, likely wrong frontend or msq URLs")
+            anyhow!("10 seconds timeout occurred, likely wrong frontend or msq URLs")
         )
     )??;
 
