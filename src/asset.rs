@@ -42,11 +42,6 @@ impl NetworkAssets {
                 result.home_net.push(a.cidr);
             }
         }
-        if result.assets.is_empty() {
-            return Err(anyhow!("cannot load any asset"));
-        } else {
-            info!("{} assets found and loaded", result.assets.len());
-        }
         Ok(result)
     }
     pub fn new(test_env: bool) -> Result<NetworkAssets> {
@@ -60,6 +55,11 @@ impl NetworkAssets {
             result.assets.append(&mut r.assets);
             result.whitelist.append(&mut r.whitelist);
             result.home_net.append(&mut r.home_net);
+        }
+        if result.assets.is_empty() {
+            return Err(anyhow!("cannot load any asset"));
+        } else {
+            info!("{} assets found and loaded", result.assets.len());
         }
         Ok(result)
     }
@@ -135,8 +135,8 @@ mod test {
     use super::*;
     #[test]
     fn test_assets() {
-        let assets = NetworkAssets::new(false);
-        assert_eq!(assets.unwrap_err().to_string(), "cannot load any asset");
+        let res = NetworkAssets::new(false);
+        assert_eq!(res.unwrap_err().to_string(), "cannot load any asset");
         let assets = NetworkAssets::new(true).unwrap();
         let ip1: IpAddr = "192.168.0.1".parse().unwrap();
         let name = assets.get_name(&ip1).unwrap();
