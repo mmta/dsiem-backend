@@ -35,6 +35,7 @@ moka = "0.9.6"
 ip_rfc = "0.1.0"
 async-trait = "0.1.64"
 openssl = { version = "0.10", features = ["vendored"] }
+metered = { git = "https://github.com/nhawkes/metered-rs", branch = "master" }
 
 [dev-dependencies]
 table-test = "0.2.1"

@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use chrono::Duration;
+use std::time::Duration;
 use clap::{ Parser, arg, command, Subcommand, Args };
 use tokio::{ task, time::timeout };
 use tracing::{ info, error, debug };
 use anyhow::{ Result, Error, anyhow };
 use tokio::sync::{ broadcast, mpsc, oneshot };
-
-use crate::manager::ManagerOpt;
+use crate::{ manager::ManagerOpt };
 
 mod logger;
 mod rule;
@@ -19,6 +18,7 @@ mod worker;
 mod manager;
 mod backlog;
 mod intel;
+mod watchdog;
 
 #[derive(Parser)]
 #[command(
@@ -92,6 +92,9 @@ pub struct ServeArgs {
     /// Maximum alarm risk value to be classified as Medium risk. Higher value than this will be classified as High risk
     #[arg(long = "med_risk_max", value_name = "2 to 9", env, default_value_t = 6)]
     med_risk_max: u8,
+    // Maximum expected rate of events/second
+    #[arg(short('e'), long = "max_eps", value_name = "number", env, default_value_t = 1000)]
+    max_eps: u32,
     /// Nats address to use for frontend - backend communication
     #[arg(
         long = "msq",
@@ -103,13 +106,13 @@ pub struct ServeArgs {
     /// Cache expiration time in minutes for intel and vuln query results
     #[arg(short('c'), long = "cache", env, value_name = "minutes", default_value_t = 10)]
     cache_duration: u8,
-    /// Length of queue for directive evaluation process, 0 means unlimited and will deactivate max_delay
+    /// Length of queue for unprocessed events, set this to a high number to emulate unbounded queue
     #[arg(short('q'), long = "max_queue", env, value_name = "events", default_value_t = 25000)]
     max_queue: usize,
     /// Duration in seconds before resetting overload condition state
     #[arg(long = "hold_duration", env, value_name = "seconds", default_value_t = 10)]
     hold_duration: u8,
-    /// Max. processing delay in seconds before throttling incoming events
+    /// Max. processing delay before throttling incoming events (under-pressure condition), 0 means disabled"
     #[arg(short = 'd', long = "max_delay", env, value_name = "seconds", default_value_t = 180)]
     max_delay: u16,
     /// Check private IP addresses against threat intel
@@ -132,7 +135,6 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     let level = logger::verbosity_to_level_filter(args.verbosity);
     let sub = logger::setup_logger(level)?;
     let log_result = tracing::subscriber::set_global_default(sub);
-
     if require_logging {
         log_result?;
     }
@@ -144,10 +146,15 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     let SubCommands::ServeCommand(sargs) = args.subcommand;
     info!("starting dsiem backend server using frontend at {}", sargs.frontend);
 
-    let max_delay = Duration::seconds(sargs.max_delay.into())
+    // we take in unsigned values from CLI to make sure there's no negative numbers, and convert them
+    // to signed value required by timestamp related APIs.
+    let max_delay = chrono::Duration
+        ::seconds(sargs.max_delay.into())
         .num_nanoseconds()
         .ok_or_else(|| log_startup_err("reading max_delay", anyhow!("invalid value provided")))?;
-    let min_alarm_lifetime = Duration::minutes(sargs.min_alarm_lifetime.into()).num_seconds();
+    let min_alarm_lifetime = chrono::Duration
+        ::minutes(sargs.min_alarm_lifetime.into())
+        .num_seconds();
     if sargs.med_risk_min < 2 || sargs.med_risk_max > 9 || sargs.med_risk_min == sargs.med_risk_max {
         return Err(
             log_startup_err(
@@ -157,8 +164,9 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         );
     }
 
-    let (event_tx, _) = broadcast::channel(sargs.max_queue);
-    let (bp_tx, bp_rx) = mpsc::channel::<()>(128);
+    let (event_tx, event_rx) = broadcast::channel(sargs.max_queue);
+    let (bp_tx, bp_rx) = mpsc::channel::<()>(8);
+    let (resptime_tx, resptime_rx) = mpsc::channel::<Duration>(128);
     let (cancel_tx, cancel_rx) = broadcast::channel::<()>(1);
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     let event_tx_clone = event_tx.clone();
@@ -169,6 +177,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
 
     let worker_handle = task::spawn({
         let assets = assets.clone();
+        let event_tx = event_tx.clone();
         async move {
             let opt = worker::WorkerOpt {
                 event_tx,
@@ -181,7 +190,8 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
                 node_name: sargs.node,
                 hold_duration: sargs.hold_duration,
             };
-            worker::start_worker(opt).await.map_err(|e| {
+            let w = worker::Worker {};
+            w.start(opt).await.map_err(|e| {
                 error!("worker error: {:?}", e);
                 e
             })
@@ -210,7 +220,8 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         max_delay,
         min_alarm_lifetime,
         backpressure_tx: bp_tx,
-        cancel_tx,
+        resptime_tx,
+        cancel_tx: cancel_tx.clone(),
         publisher: event_tx_clone,
         med_risk_max: sargs.med_risk_max,
         med_risk_min: sargs.med_risk_min,
@@ -223,9 +234,22 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
             error!("{:?}", e);
             e
         }) });
-    let (worker_res, manager_res) = tokio::join!(worker_handle, manager_handle);
+
+    let watchdog_handle = task::spawn(async move {
+        let w = watchdog::Watchdog::default();
+        w.start(event_tx, event_rx, resptime_rx, cancel_tx, sargs.max_eps).await.map_err(|e| {
+            error!("{:?}", e);
+            e
+        })
+    });
+    let (worker_res, manager_res, watchdog_res) = tokio::join!(
+        worker_handle,
+        manager_handle,
+        watchdog_handle
+    );
     debug!("about to get result");
     worker_res??;
     manager_res??;
+    watchdog_res??;
     Ok(())
 }

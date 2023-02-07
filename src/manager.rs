@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ sync::Arc, time::Duration };
 
 use tracing::{ info, debug, error };
 
@@ -24,6 +24,7 @@ pub struct ManagerOpt {
     pub min_alarm_lifetime: i64,
     pub backpressure_tx: mpsc::Sender<()>,
     pub cancel_tx: broadcast::Sender<()>,
+    pub resptime_tx: mpsc::Sender<Duration>,
     pub publisher: broadcast::Sender<NormalizedEvent>,
     pub default_status: String,
     pub default_tag: String,
@@ -53,6 +54,7 @@ impl Manager {
             let default_status = self.option.default_status.clone();
             let default_tag = self.option.default_tag.clone();
             let cancel_tx = self.option.cancel_tx.clone();
+            let resptime_tx = self.option.resptime_tx.clone();
 
             if directive.id == 1 || directive.id == 2 {
                 continue;
@@ -143,9 +145,10 @@ impl Manager {
                                     backlogs.push(locked);
                                     let rx = downstream_tx.subscribe();
                                     let max_delay = self.option.max_delay;
+                                    let resptime_tx = resptime_tx.clone();
                                     let _detached = task::spawn(async move {
                                         let w = clone;
-                                        if let Err(e) = w.start(rx, max_delay).await {
+                                        if let Err(e) = w.start(rx, resptime_tx, max_delay).await {
                                             error!(
                                                 directive.id,
                                                 w.id,

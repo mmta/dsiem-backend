@@ -1,5 +1,6 @@
-use std::{ net::IpAddr, collections::HashSet, ops::Deref, time::Duration, sync::Arc };
+use std::{ net::IpAddr, collections::HashSet, ops::Deref, time::{ Duration, Instant }, sync::Arc };
 use chrono::{ DateTime, Utc };
+use metered::{ metered, ResponseTime };
 use serde::Deserialize;
 use serde_derive::Serialize;
 use tokio::{
@@ -65,40 +66,42 @@ pub struct Backlog {
     pub intel_hits: RwLock<HashSet<IntelResult>>,
     #[serde(skip_serializing_if = "is_locked_data_empty")]
     pub custom_data: RwLock<HashSet<CustomData>>,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub current_stage: RwLock<u8>,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub highest_stage: u8,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub last_srcport: RwLock<u16>, // copied from event for vuln check
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub last_dstport: RwLock<u16>, // copied from event for vuln check
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub all_rules_always_active: bool, // copied from directive
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub priority: u8, // copied from directive
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub assets: Arc<NetworkAssets>,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     alarm_events_writer: TokioRwLock<Option<File>>,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     alarm_writer: TokioRwLock<Option<File>>,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     backpressure_tx: Option<Sender<()>>,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     delete_channel: DeleteChannel,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub state: RwLock<BacklogState>,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub min_alarm_lifetime: i64,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub med_risk_min: u8,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub med_risk_max: u8,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub intels: Option<Arc<IntelPlugin>>,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing)]
     pub intel_private_ip: bool,
+    #[serde(skip_serializing)]
+    metrics: Metrics,
 }
 
 // This is only used for serialize
@@ -146,6 +149,7 @@ pub struct BacklogOpt<'a> {
     pub intel_private_ip: bool,
 }
 
+#[metered(registry = Metrics)]
 impl Backlog {
     pub async fn new(o: BacklogOpt<'_>) -> Result<Self> {
         let mut backlog = Backlog {
@@ -204,7 +208,12 @@ impl Backlog {
         self.delete()
     }
 
-    pub async fn start(&self, mut rx: Receiver<NormalizedEvent>, max_delay: i64) -> Result<()> {
+    pub async fn start(
+        &self,
+        mut rx: Receiver<NormalizedEvent>,
+        resptime_tx: Sender<Duration>,
+        max_delay: i64
+    ) -> Result<()> {
         let mut expiration_checker = interval(Duration::from_secs(10));
         let mut delete_rx = self.delete_channel.rx.clone();
         debug!(self.id, "enter running state");
@@ -212,41 +221,43 @@ impl Backlog {
 
         loop {
             tokio::select! {
-               _ = expiration_checker.tick() => {
-                if let Ok((expired, seconds_left)) = self.is_expired() {
-                    if expired {
-                        debug!(self.id, "backlog expired, setting last stage status to timeout and deleting it");
-                        if let Err(e) = self.handle_expiration().await {
-                            debug!{self.id, "error updating status and deleting backlog: {}", e.to_string()}
+                _ = expiration_checker.tick() => {
+                    if let Ok((expired, seconds_left)) = self.is_expired() {
+                        if expired {
+                            debug!(self.id, "backlog expired, setting last stage status to timeout and deleting it");
+                            if let Err(e) = self.handle_expiration().await {
+                                debug!{self.id, "error updating status and deleting backlog: {}", e.to_string()}
+                            }
+                        } else {
+                            debug!(self.id, "backlog will expire in {} seconds", seconds_left);
                         }
-                    } else {
-                        debug!(self.id, "backlog will expire in {} seconds", seconds_left);
                     }
-                }
-               },
-               Ok(event) = rx.recv() => {
-                {
-                    let r = self.state.read();
-                    if *r != BacklogState::Running {
-                        warn!(self.id, event.id, "event received, but backlog state is not running");
-                        continue;
-                    }    
-                }
-                debug!(self.id, event.id, "event received");
-                if let Err(e) = self.process_new_event(&event,  max_delay).await {
-                    error!(self.id, event.id, "{}", e);
-                }
-               },
-               _ = delete_rx.changed() => {
-                self.set_state(BacklogState::Stopped);
-                debug!(self.id, "backlog delete signal received");
-                if let Some(v) = &self.delete_channel.to_upstream_manager {
-                    if let Err(e) = v.send(()).await {
-                        debug!{self.id, "error notifying manager about backlog deletion: {:?}", e}
+                },
+                Ok(event) = rx.recv() => {
+                    {
+                        let r = self.state.read();
+                        if *r != BacklogState::Running {
+                            warn!(self.id, event.id, "event received, but backlog state is not running");
+                            continue;
+                        }    
                     }
-                };
-                break
-               },
+                    debug!(self.id, event.id, "event received");
+                    let now = Instant::now();
+                    if let Err(e) = self.process_new_event(&event,  max_delay).await {
+                        error!(self.id, event.id, "{}", e);
+                    };
+                    _ = resptime_tx.try_send( now.elapsed());
+                },  
+                _ = delete_rx.changed() => {
+                    self.set_state(BacklogState::Stopped);
+                    debug!(self.id, "backlog delete signal received");
+                    if let Some(v) = &self.delete_channel.to_upstream_manager {
+                        if let Err(e) = v.send(()).await {
+                            debug!{self.id, "error notifying manager about backlog deletion: {:?}", e}
+                        }
+                    };
+                    break
+                },
             }
         }
         info!(self.id, "exited running state");
@@ -278,7 +289,7 @@ impl Backlog {
             })
             .max()
             .unwrap_or_default();
-        prev_stage_ts < ts.timestamp()
+        prev_stage_ts <= ts.timestamp()
     }
 
     pub fn current_rule(&self) -> Result<&DirectiveRule> {
@@ -290,6 +301,7 @@ impl Backlog {
             .ok_or_else(|| anyhow!("cannot locate the current rule"))
     }
 
+    #[measure([ResponseTime])]
     pub async fn process_new_event(&self, event: &NormalizedEvent, max_delay: i64) -> Result<()> {
         let curr_rule = self.current_rule()?;
 
@@ -587,6 +599,10 @@ impl Backlog {
     }
 
     fn is_under_pressure(&self, rcvd_time: i64, max_delay: i64) -> bool {
+        if max_delay == 0 {
+            return false;
+        }
+        // if rcvd_time is in the future, then this always returns false
         let now = Utc::now().timestamp_nanos();
         now - rcvd_time > max_delay
     }
