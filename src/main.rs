@@ -6,19 +6,21 @@ use tokio::{ task, time::timeout };
 use tracing::{ info, error, debug };
 use anyhow::{ Result, Error, anyhow };
 use tokio::sync::{ broadcast, mpsc, oneshot };
-use crate::{ manager::ManagerOpt };
+use crate::{ manager::ManagerOpt, watchdog::WatchdogOpt };
 
-mod logger;
+mod asset;
+mod event;
 mod rule;
 mod directive;
-mod utils;
-mod event;
-mod asset;
+mod backlog;
 mod worker;
 mod manager;
-mod backlog;
-mod intel;
 mod watchdog;
+mod intel;
+mod logger;
+mod utils;
+
+const REPORT_INTERVAL_IN_SECONDS: u64 = 10;
 
 #[derive(Parser)]
 #[command(
@@ -106,7 +108,7 @@ pub struct ServeArgs {
     /// Cache expiration time in minutes for intel and vuln query results
     #[arg(short('c'), long = "cache", env, value_name = "minutes", default_value_t = 10)]
     cache_duration: u8,
-    /// Length of queue for unprocessed events, set this to a high number to emulate unbounded queue
+    /// Length of queue for unprocessed events, setting this to 0 will use 1,000,000 events to emulate unbounded queue
     #[arg(short('q'), long = "max_queue", env, value_name = "events", default_value_t = 25000)]
     max_queue: usize,
     /// Duration in seconds before resetting overload condition state
@@ -163,17 +165,21 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
             )
         );
     }
+    let max_queue = if sargs.max_queue == 0 { 1_000_000 } else { sargs.max_queue };
 
-    let (event_tx, event_rx) = broadcast::channel(sargs.max_queue);
+    let (event_tx, event_rx) = broadcast::channel(max_queue);
     let (bp_tx, bp_rx) = mpsc::channel::<()>(8);
     let (resptime_tx, resptime_rx) = mpsc::channel::<Duration>(128);
     let (cancel_tx, cancel_rx) = broadcast::channel::<()>(1);
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     let event_tx_clone = event_tx.clone();
 
-    let assets = Arc::new(
-        asset::NetworkAssets::new(test_env).map_err(|e| log_startup_err("loading assets", e))?
-    );
+    let c = cancel_tx.clone();
+    ctrlc::set_handler(move || {
+        let _ = c.send(());
+    })?;
+
+    let assets = Arc::new(asset::NetworkAssets::default());
 
     let worker_handle = task::spawn({
         let assets = assets.clone();
@@ -191,7 +197,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
                 hold_duration: sargs.hold_duration,
             };
             let w = worker::Worker {};
-            w.start(opt).await.map_err(|e| {
+            w.start(opt, test_env).await.map_err(|e| {
                 error!("worker error: {:?}", e);
                 e
             })
@@ -204,6 +210,9 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         )
     )??;
 
+    let assets = Arc::new(asset::NetworkAssets::new(test_env)?);
+    debug!("assets after worker: {:?}", assets);
+
     let directives = directive
         ::load_directives(test_env)
         .map_err(|e| log_startup_err("loading directives", e))?;
@@ -211,6 +220,28 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     let intels = Arc::new(
         intel::load_intel(test_env).map_err(|e| log_startup_err("loading intels", e))?
     );
+
+    let (report_tx, report_rx) = mpsc::channel::<manager::ManagerReport>(directives.len());
+
+    let watchdog_handle = task::spawn({
+        let cancel_tx = cancel_tx.clone();
+        let opt = WatchdogOpt {
+            event_tx,
+            event_rx,
+            resptime_rx,
+            report_rx,
+            cancel_tx,
+            report_interval: REPORT_INTERVAL_IN_SECONDS,
+            max_eps: sargs.max_eps,
+        };
+        async move {
+            let w = watchdog::Watchdog::default();
+            w.start(opt).await.map_err(|e| {
+                error!("{:?}", e);
+                e
+            })
+        }
+    });
 
     let opt = ManagerOpt {
         test_env,
@@ -221,33 +252,28 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         min_alarm_lifetime,
         backpressure_tx: bp_tx,
         resptime_tx,
-        cancel_tx: cancel_tx.clone(),
+        cancel_tx,
         publisher: event_tx_clone,
         med_risk_max: sargs.med_risk_max,
         med_risk_min: sargs.med_risk_min,
         default_status: sargs.status[0].clone(),
         default_tag: sargs.tags[0].clone(),
         intel_private_ip: sargs.intel_private_ip,
+        report_tx,
     };
     let manager = manager::Manager::new(opt).map_err(|e| log_startup_err("loading manager", e))?;
-    let manager_handle = task::spawn(async { manager.listen().await.map_err(|e| {
-            error!("{:?}", e);
-            e
-        }) });
+    let manager_handle = task::spawn(async { manager
+            .listen(REPORT_INTERVAL_IN_SECONDS).await
+            .map_err(|e| {
+                error!("{:?}", e);
+                e
+            }) });
 
-    let watchdog_handle = task::spawn(async move {
-        let w = watchdog::Watchdog::default();
-        w.start(event_tx, event_rx, resptime_rx, cancel_tx, sargs.max_eps).await.map_err(|e| {
-            error!("{:?}", e);
-            e
-        })
-    });
     let (worker_res, manager_res, watchdog_res) = tokio::join!(
         worker_handle,
         manager_handle,
         watchdog_handle
     );
-    debug!("about to get result");
     worker_res??;
     manager_res??;
     watchdog_res??;

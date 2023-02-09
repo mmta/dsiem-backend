@@ -4,7 +4,8 @@
       "name": "Bad traffic",
       "kingdom": "Reconnaissance & Probing",
       "category": "Misc Activity",
-      "id": 150,
+      "id": 151,
+      "disabled": true,
       "priority": 3,
       "rules": [
         {

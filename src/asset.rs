@@ -26,7 +26,7 @@ pub struct NetworkAssets {
     #[serde(skip_deserializing)]
     whitelist: Vec<IpCidr>,
     #[serde(skip_deserializing)]
-    home_net: Vec<IpCidr>,
+    pub home_net: Vec<IpCidr>,
 }
 
 impl NetworkAssets {

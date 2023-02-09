@@ -89,6 +89,8 @@ pub struct Backlog {
     #[serde(skip_serializing)]
     delete_channel: DeleteChannel,
     #[serde(skip_serializing)]
+    pub found_channel: FoundChannel,
+    #[serde(skip_serializing)]
     pub state: RwLock<BacklogState>,
     #[serde(skip_serializing)]
     pub min_alarm_lifetime: i64,
@@ -128,9 +130,26 @@ impl Default for DeleteChannel {
     }
 }
 
+// for debugging only, to detect when a backlog is out of scope and deleted
 impl Drop for DeleteChannel {
     fn drop(&mut self) {
-        trace!("Backlog's delete channel dropped!");
+        trace!("Backlog's delete dropped!");
+    }
+}
+
+#[derive(Debug)]
+pub struct FoundChannel {
+    tx: tokio::sync::watch::Sender<bool>,
+    pub locked_rx: tokio::sync::Mutex<tokio::sync::watch::Receiver<bool>>,
+}
+
+impl Default for FoundChannel {
+    fn default() -> Self {
+        let (tx, rx) = watch::channel(false);
+        FoundChannel {
+            tx,
+            locked_rx: tokio::sync::Mutex::new(rx),
+        }
     }
 }
 
@@ -168,6 +187,7 @@ impl Backlog {
             priority: o.directive.priority,
             all_rules_always_active: o.directive.all_rules_always_active,
             backpressure_tx: Some(o.bp_tx),
+
             assets: o.asset,
 
             min_alarm_lifetime: o.min_alarm_lifetime,
@@ -211,9 +231,11 @@ impl Backlog {
     pub async fn start(
         &self,
         mut rx: Receiver<NormalizedEvent>,
+        initial_event: &NormalizedEvent,
         resptime_tx: Sender<Duration>,
         max_delay: i64
     ) -> Result<()> {
+        self.process_new_event(initial_event, max_delay).await?;
         let mut expiration_checker = interval(Duration::from_secs(10));
         let mut delete_rx = self.delete_channel.rx.clone();
         debug!(self.id, "enter running state");
@@ -244,7 +266,7 @@ impl Backlog {
                     debug!(self.id, event.id, "event received");
                     let now = Instant::now();
                     if let Err(e) = self.process_new_event(&event,  max_delay).await {
-                        error!(self.id, event.id, "{}", e);
+                        error!(self.id, event.id, "error processing event: {}", e);
                     };
                     _ = resptime_tx.try_send( now.elapsed());
                 },  
@@ -301,6 +323,11 @@ impl Backlog {
             .ok_or_else(|| anyhow!("cannot locate the current rule"))
     }
 
+    fn report_to_manager(&self, match_found: bool) -> Result<()> {
+        self.found_channel.tx.send(match_found)?;
+        Ok(())
+    }
+
     #[measure([ResponseTime])]
     pub async fn process_new_event(&self, event: &NormalizedEvent, max_delay: i64) -> Result<()> {
         let curr_rule = self.current_rule()?;
@@ -316,6 +343,7 @@ impl Backlog {
         if !curr_rule.does_event_match(&self.assets, event, true) {
             // if flag is set, check if event match previous stage
             if self.all_rules_always_active && curr_rule.stage != 1 {
+                debug!(self.id, "checking prev rules because all_rules_always_active is on");
                 let prev_rules = self.rules
                     .iter()
                     .filter(|v| v.stage < curr_rule.stage)
@@ -326,22 +354,22 @@ impl Backlog {
                     }
                     // event match previous rule, processing it further here
                     // just add the event to the stage, no need to process other steps in processMatchedEvent
-
+                    debug!(self.id, event.id, r.stage, "previous rule match");
                     self.append_and_write_event(event).await?;
                     // also update alarm to sync any changes to customData
-                    // b.updateAlarm(evt.ConnID, false, nil);
-                    debug!(self.id, event.id, "previous rule consume event");
+                    self.update_alarm(false).await?;
+                    debug!(self.id, event.id, r.stage, "previous rule consume event");
+                    _ = self.report_to_manager(true);
                     return Ok(());
                     // no need to process further rules
                 }
             }
-            debug!(self.id, event.id, "event doesnt match");
-            debug!(self.id, "{:?}", curr_rule);
-            debug!(self.id, "{:?}", event);
+            debug!(self.id, event.id, "event doesn't match");
+            // debug!(self.id, "rule: {:?}", curr_rule);
+            // debug!(self.id, "event: {:?}", event);
+            _ = self.report_to_manager(false);
             return Ok(());
         }
-        // event match current rule, processing it further here
-        debug!(self.id, event.id, "rule stage {} match event", curr_rule.stage);
 
         // if stickydiff is set, there must be added member to sdiff_string or sdiff_int
         if !curr_rule.sticky_different.is_empty() {
@@ -352,14 +380,20 @@ impl Backlog {
                     "backlog can't find new unique value in stickydiff field {}",
                     curr_rule.sticky_different
                 );
+                _ = self.report_to_manager(false);
                 return Ok(());
             }
         }
 
         if !self.is_time_in_order(&event.timestamp) {
             warn!(self.id, event.id, "discarded out of order event");
+            _ = self.report_to_manager(false);
             return Ok(());
         }
+
+        // event match current rule, processing it further here
+        debug!(self.id, event.id, "rule stage {} match event", curr_rule.stage);
+        _ = self.report_to_manager(true);
 
         if self.is_under_pressure(event.rcvd_time, max_delay) {
             warn!(self.id, event.id, "is under pressure");
@@ -369,6 +403,7 @@ impl Backlog {
                 }
             }
         }
+
         debug!(self.id, event.id, "processing matching event");
         self.process_matched_event(event).await
     }
@@ -480,7 +515,7 @@ impl Backlog {
         debug!(self.id, "checking if this is the last stage");
         // if it causes the last stage to reach events_count == occurrence, delete it
         if self.is_last_stage() {
-            info!(self.id, "reached max stage and occurrence");
+            info!(self.id, "reached max stage and occurrence, deleting backlog");
             self.update_alarm(true).await?;
             self.delete()?;
             return Ok(());

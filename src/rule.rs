@@ -4,7 +4,7 @@ use cidr::IpCidr;
 use serde::{ Serializer, Deserializer };
 use serde_derive::{ Deserialize, Serialize };
 use parking_lot::RwLock;
-use tracing::{ warn, error };
+use tracing::warn;
 
 use crate::{ event::NormalizedEvent, asset::NetworkAssets };
 use anyhow::Result;
@@ -153,7 +153,6 @@ fn plugin_rule_check(
         }
     }
     if !sid_match {
-        error!("returning 3");
         return false;
     }
     if r.sticky_different == "PLUGIN_SID" {
@@ -256,11 +255,11 @@ fn ip_port_check(
         return false;
     }
 
-    let dst_ip_in_homenet = a.is_in_homenet(&e.dst_ip);
-    if r.to == "HOME_NET" && !srcip_in_homenet {
+    let dstip_in_homenet = a.is_in_homenet(&e.dst_ip);
+    if r.to == "HOME_NET" && !dstip_in_homenet {
         return false;
     }
-    if r.to == "!HOME_NET" && dst_ip_in_homenet {
+    if r.to == "!HOME_NET" && dstip_in_homenet {
         return false;
     }
     // covers  r.From == "IP", r.From == "IP1, IP2, !IP3", r.From == CIDR-netaddr, r.From == "CIDR1, CIDR2, !CIDR3"

@@ -5,7 +5,7 @@ use futures::StreamExt;
 use tokio::{ sync::{ broadcast::{ Sender, self }, oneshot, mpsc }, time::interval };
 use std::str;
 
-use crate::{ utils, event::{ self, NormalizedEvent }, asset::NetworkAssets };
+use crate::{ utils, event::{ self, NormalizedEvent }, asset::{ NetworkAssets, self } };
 use serde::Deserialize;
 use tracing::{ info, error, debug };
 use anyhow::{ Result, Context, anyhow };
@@ -53,13 +53,17 @@ pub struct WorkerOpt {
 pub struct Worker {}
 
 impl Worker {
-    pub async fn start(&self, mut opt: WorkerOpt) -> Result<()> {
+    pub async fn start(&self, mut opt: WorkerOpt, test_env: bool) -> Result<()> {
         let config_dir = utils::config_dir(false)?;
         self.download_config_files(
             config_dir.to_string_lossy().to_string(),
             opt.frontend_url,
             opt.node_name
         ).await?;
+        opt.assets = Arc::new(asset::NetworkAssets::new(test_env)?);
+
+        debug!("assets INSIDE worker: {:?}", opt.assets);
+
         let client = nats_client(&opt.nats_url).await?;
 
         let mut subscription = client
@@ -181,7 +185,9 @@ impl Worker {
             let resp = reqwest::get(url.clone()).await?;
             let content = resp.text().await?;
             let path = conf_dir.clone() + "/" + &f.filename;
-            let mut local = File::create(path).context("cannot create config file")?;
+            let mut local = File::create(&path).context(
+                format!("cannot create config file {}", path)
+            )?;
             local.write_all(content.as_bytes()).context("cannot write file")?;
         }
 
