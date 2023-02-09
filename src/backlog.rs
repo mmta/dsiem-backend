@@ -218,7 +218,12 @@ impl Backlog {
 
         backlog.intels = Some(o.intel);
 
-        info!(directive_id = o.directive.id, backlog.id, "new backlog created");
+        info!(
+            directive_id = o.directive.id,
+            backlog.id,
+            event_id = o.event.id,
+            "new backlog created"
+        );
         Ok(backlog)
     }
 

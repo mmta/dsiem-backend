@@ -1,26 +1,16 @@
 // ch chan<- event.NormalizedEvent, msq string, msqPrefix string, nodeName string, confDir string, frontend string
 
-use std::{ fs::File, io::Write, sync::Arc, time::Duration };
+use std::{ sync::Arc, time::Duration };
 use futures::StreamExt;
 use tokio::{ sync::{ broadcast::{ Sender, self }, oneshot, mpsc }, time::interval };
 use std::str;
 
-use crate::{ utils, event::{ self, NormalizedEvent }, asset::{ NetworkAssets, self } };
-use serde::Deserialize;
+use crate::{ event::{ self, NormalizedEvent }, asset::NetworkAssets };
 use tracing::{ info, error, debug };
 use anyhow::{ Result, Context, anyhow };
 
 const EVENT_SUBJECT: &str = "dsiem_events";
 const BP_SUBJECT: &str = "dsiem_overload_signals";
-
-#[derive(Deserialize)]
-struct ConfigFile {
-    filename: String,
-}
-#[derive(Deserialize)]
-struct ConfigFiles {
-    files: Vec<ConfigFile>,
-}
 
 async fn nats_client(nats_url: &str) -> Result<async_nats::Client> {
     let client = async_nats::ConnectOptions
@@ -39,9 +29,7 @@ async fn nats_client(nats_url: &str) -> Result<async_nats::Client> {
 }
 
 pub struct WorkerOpt {
-    pub frontend_url: String,
     pub nats_url: String,
-    pub node_name: String,
     pub event_tx: broadcast::Sender<NormalizedEvent>,
     pub bp_rx: mpsc::Receiver<()>,
     pub ready_tx: oneshot::Sender<()>,
@@ -53,17 +41,7 @@ pub struct WorkerOpt {
 pub struct Worker {}
 
 impl Worker {
-    pub async fn start(&self, mut opt: WorkerOpt, test_env: bool) -> Result<()> {
-        let config_dir = utils::config_dir(false)?;
-        self.download_config_files(
-            config_dir.to_string_lossy().to_string(),
-            opt.frontend_url,
-            opt.node_name
-        ).await?;
-        opt.assets = Arc::new(asset::NetworkAssets::new(test_env)?);
-
-        debug!("assets INSIDE worker: {:?}", opt.assets);
-
+    pub async fn start(&self, mut opt: WorkerOpt) -> Result<()> {
         let client = nats_client(&opt.nats_url).await?;
 
         let mut subscription = client
@@ -74,7 +52,7 @@ impl Worker {
         let mut reset_bp = interval(Duration::from_secs(opt.hold_duration.into()));
         let mut bp_state = false;
 
-        info!("worker listening for new events");
+        info!("listening for new events");
         opt.ready_tx.send(()).map_err(|_| anyhow!("cannot send ready signal"))?;
 
         loop {
@@ -150,47 +128,6 @@ impl Worker {
             return Err(anyhow!(err_text));
         }
         debug!("event {} broadcasted", e.id);
-        Ok(())
-    }
-
-    async fn list_config_files(&self, frontend_url: String) -> Result<Vec<ConfigFile>> {
-        debug!("listing config files from {}", frontend_url);
-        let resp = reqwest
-            ::get(frontend_url.clone() + "/config/").await
-            .context("cannot get a list of config files from frontend")?;
-        let text = resp
-            .text().await
-            .context("cannot parse response for request to list config files")?;
-        let c: ConfigFiles = serde_json::from_str(&text)?;
-        Ok(c.files)
-    }
-
-    async fn download_config_files(
-        &self,
-        conf_dir: String,
-        frontend_url: String,
-        node_name: String
-    ) -> Result<()> {
-        let files = self.list_config_files(frontend_url.clone()).await?;
-        for f in files
-            .into_iter()
-            .filter(
-                |f|
-                    f.filename.starts_with("assets_") ||
-                    f.filename.starts_with("intel_") ||
-                    f.filename.starts_with("vuln_") ||
-                    f.filename.starts_with(&format!("directives_{}", node_name.clone()))
-            ) {
-            let url = frontend_url.clone() + "/config/" + &f.filename;
-            let resp = reqwest::get(url.clone()).await?;
-            let content = resp.text().await?;
-            let path = conf_dir.clone() + "/" + &f.filename;
-            let mut local = File::create(&path).context(
-                format!("cannot create config file {}", path)
-            )?;
-            local.write_all(content.as_bytes()).context("cannot write file")?;
-        }
-
         Ok(())
     }
 }

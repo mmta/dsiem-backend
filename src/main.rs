@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use clap::{ Parser, arg, command, Subcommand, Args };
 use tokio::{ task, time::timeout };
-use tracing::{ info, error, debug };
+use tracing::{ info, error };
 use anyhow::{ Result, Error, anyhow };
 use tokio::sync::{ broadcast, mpsc, oneshot };
-use crate::{ manager::ManagerOpt, watchdog::WatchdogOpt };
+use crate::{ manager::ManagerOpt, watchdog::WatchdogOpt, asset::NetworkAssets };
 
 mod asset;
 mod event;
@@ -19,6 +19,7 @@ mod watchdog;
 mod intel;
 mod logger;
 mod utils;
+mod config;
 
 const REPORT_INTERVAL_IN_SECONDS: u64 = 10;
 
@@ -146,7 +147,11 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     }
 
     let SubCommands::ServeCommand(sargs) = args.subcommand;
-    info!("starting dsiem backend server using frontend at {}", sargs.frontend);
+    info!(
+        "starting dsiem backend server with frontend {} and message queue {}",
+        sargs.frontend,
+        sargs.msq
+    );
 
     // we take in unsigned values from CLI to make sure there's no negative numbers, and convert them
     // to signed value required by timestamp related APIs.
@@ -179,7 +184,13 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         let _ = c.send(());
     })?;
 
-    let assets = Arc::new(asset::NetworkAssets::default());
+    config
+        ::download_files(test_env, sargs.frontend, sargs.node).await
+        .map_err(|e| log_startup_err("downloading config", e))?;
+
+    let assets = Arc::new(
+        NetworkAssets::new(test_env).map_err(|e| log_startup_err("loading assets", e))?
+    );
 
     let worker_handle = task::spawn({
         let assets = assets.clone();
@@ -191,13 +202,11 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
                 ready_tx,
                 cancel_rx,
                 assets,
-                frontend_url: sargs.frontend,
                 nats_url: sargs.msq,
-                node_name: sargs.node,
                 hold_duration: sargs.hold_duration,
             };
             let w = worker::Worker {};
-            w.start(opt, test_env).await.map_err(|e| {
+            w.start(opt).await.map_err(|e| {
                 error!("worker error: {:?}", e);
                 e
             })
@@ -206,12 +215,9 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     timeout(std::time::Duration::from_secs(10), ready_rx).await.map_err(|_|
         log_startup_err(
             "waiting for worker",
-            anyhow!("10 seconds timeout occurred, likely wrong frontend or msq URLs")
+            anyhow!("10 seconds timeout occurred, likely wrong msq URLs")
         )
     )??;
-
-    let assets = Arc::new(asset::NetworkAssets::new(test_env)?);
-    debug!("assets after worker: {:?}", assets);
 
     let directives = directive
         ::load_directives(test_env)
