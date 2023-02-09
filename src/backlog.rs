@@ -1,4 +1,10 @@
-use std::{ net::IpAddr, collections::HashSet, ops::Deref, time::{ Duration, Instant }, sync::Arc };
+use std::{
+    net::{ IpAddr, Ipv4Addr },
+    collections::HashSet,
+    ops::Deref,
+    time::{ Duration, Instant },
+    sync::Arc,
+};
 use chrono::{ DateTime, Utc };
 use metered::{ metered, ResponseTime };
 use serde::Deserialize;
@@ -32,6 +38,7 @@ pub struct CustomData {
 
 #[derive(Serialize)]
 pub struct SiemAlarmEvent {
+    #[serde(rename(serialize = "alarm_id"))]
     id: String,
     stage: u8,
     event_id: String,
@@ -48,6 +55,7 @@ pub enum BacklogState {
 // serialize should only for alarm fields
 #[derive(Debug, Serialize, Default)]
 pub struct Backlog {
+    #[serde(rename(serialize = "alarm_id"))]
     pub id: String,
     pub title: String,
     pub status: String,
@@ -320,10 +328,19 @@ impl Backlog {
     }
 
     pub fn current_rule(&self) -> Result<&DirectiveRule> {
-        let reader = self.current_stage.read();
+        self.get_rule(None)
+    }
+
+    pub fn get_rule(&self, stage: Option<u8>) -> Result<&DirectiveRule> {
+        let s = if let Some(v) = stage {
+            v
+        } else {
+            let reader = self.current_stage.read();
+            *reader
+        };
         self.rules
             .iter()
-            .filter(|v| v.stage == *reader)
+            .filter(|v| v.stage == s)
             .last()
             .ok_or_else(|| anyhow!("cannot locate the current rule"))
     }
@@ -360,7 +377,7 @@ impl Backlog {
                     // event match previous rule, processing it further here
                     // just add the event to the stage, no need to process other steps in processMatchedEvent
                     debug!(self.id, event.id, r.stage, "previous rule match");
-                    self.append_and_write_event(event).await?;
+                    self.append_and_write_event(event, Some(r.stage)).await?;
                     // also update alarm to sync any changes to customData
                     self.update_alarm(false).await?;
                     debug!(self.id, event.id, r.stage, "previous rule consume event");
@@ -499,7 +516,7 @@ impl Backlog {
     }
 
     async fn process_matched_event(&self, event: &NormalizedEvent) -> Result<()> {
-        self.append_and_write_event(event).await?;
+        self.append_and_write_event(event, None).await?;
         // exit early if the newly added event hasnt caused events_count == occurrence
         // for the current stage
         if !self.is_stage_reach_max_event_count()? {
@@ -562,31 +579,44 @@ impl Backlog {
         }
     }
 
-    async fn append_and_write_event(&self, event: &NormalizedEvent) -> Result<()> {
-        let curr_rule = self.current_rule()?;
+    async fn append_and_write_event(
+        &self,
+        event: &NormalizedEvent,
+        stage: Option<u8>
+    ) -> Result<()> {
+        let target_rule = self.get_rule(stage)?;
         {
-            let ttl_events = curr_rule.event_ids.read().len();
+            let ttl_events = target_rule.event_ids.read().len();
             debug!(
                 self.id,
                 event.id,
-                curr_rule.stage,
+                target_rule.stage,
                 "appending event {}/{}",
                 ttl_events,
-                curr_rule.occurrence
+                target_rule.occurrence
             );
         }
         {
-            let mut w = curr_rule.event_ids.write();
+            let mut w = target_rule.event_ids.write();
             w.insert(event.id.clone());
         }
+
+        const DEFAULT_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
         {
             let mut w = self.src_ips.write();
             w.insert(event.src_ip);
+            if w.len() > 1 && w.contains(&DEFAULT_IP) {
+                w.remove(&DEFAULT_IP);
+            }
         }
         {
             let mut w = self.dst_ips.write();
             w.insert(event.dst_ip);
+            if w.len() > 1 && w.contains(&DEFAULT_IP) {
+                w.remove(&DEFAULT_IP);
+            }
         }
+
         {
             let mut w = self.custom_data.write();
             if !event.custom_data1.is_empty() {
@@ -611,7 +641,7 @@ impl Backlog {
 
         self.set_ports(event);
         self.set_update_time();
-        self.append_siem_alarm_events(event).await?;
+        self.append_siem_alarm_events(event, stage).await?;
         Ok(())
     }
 
@@ -661,19 +691,21 @@ impl Backlog {
         }
     }
 
-    async fn append_siem_alarm_events(&self, e: &NormalizedEvent) -> Result<()> {
-        let sae: SiemAlarmEvent;
-        {
+    async fn append_siem_alarm_events(&self, e: &NormalizedEvent, stage: Option<u8>) -> Result<()> {
+        let s = if let Some(v) = stage {
+            v
+        } else {
             let reader = self.current_stage.read();
-            sae = SiemAlarmEvent {
-                id: self.id.clone(),
-                stage: *reader,
-                event_id: e.id.clone(),
-            };
-        }
+            *reader
+        };
+        let sae = SiemAlarmEvent {
+            id: self.id.clone(),
+            stage: s,
+            event_id: e.id.clone(),
+        };
         let s = serde_json::to_string(&sae)? + "\n";
         trace!(
-            id = sae.id,
+            alarm_id = sae.id,
             stage = sae.stage,
             event_id = sae.event_id,
             "appending siem_alarm_events"

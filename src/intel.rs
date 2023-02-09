@@ -2,7 +2,7 @@ use std::{ net::IpAddr, collections::HashSet, fs, sync::Arc, fmt, time::Duration
 use moka::sync::Cache;
 use anyhow::Result;
 use serde::{ Deserialize, Serialize };
-use tracing::{ info, trace };
+use tracing::{ info, debug };
 use glob::glob;
 use async_trait::async_trait;
 
@@ -62,18 +62,18 @@ impl IntelPlugin {
         for c in self.checkers.iter() {
             for ip in targets.iter() {
                 if !check_private_ip && !ip_rfc::global(ip) {
-                    trace!("skipping private IP {}", ip);
+                    debug!("skipping private IP {}", ip);
                     continue;
                 }
                 let res = if let Some(v) = self.cache.get(ip) {
-                    trace!("returning intel result from cache for {}", ip);
+                    debug!("returning intel result from cache for {}", ip);
                     v
                 } else {
                     let v = tokio::time::timeout(
                         Duration::from_secs(INTEL_MAX_SECONDS),
                         c.check_ip(*ip)
                     ).await??;
-                    trace!("obtained intel result for {}", ip);
+                    debug!("obtained intel result for {}", ip);
                     v
                 };
                 set.extend(res.clone());

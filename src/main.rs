@@ -39,6 +39,12 @@ struct Cli {
     /// Increase logging verbosity
     #[arg(short('v'), long, action = clap::ArgAction::Count)]
     verbosity: u8,
+    /// Enable debug output, for compatibility purpose
+    #[arg(long = "debug", env = "DSIEM_DEBUG", value_name = "boolean", default_value_t = false)]
+    pub debug: bool,
+    /// Enable trace output, for compatibility purpose
+    #[arg(long = "trace", env = "DSIEM_TRACE", value_name = "boolean", default_value_t = false)]
+    pub trace: bool,
 }
 
 #[derive(Subcommand)]
@@ -65,13 +71,19 @@ pub struct ServeArgs {
     #[arg(short('n'), long = "node", env = "DSIEM_NODE", value_name = "string")]
     pub node: String,
     /// Min. alarm lifetime in minutes. Backlog won't expire sooner than this regardless rule timeouts. This is to support processing of delayed events
-    #[arg(short('l'), long, env, value_name = "minutes", default_value_t = 0)]
+    #[arg(
+        short('l'),
+        long,
+        env = "DSIEM_MINALARMLIFETIME",
+        value_name = "minutes",
+        default_value_t = 0
+    )]
     min_alarm_lifetime: u16,
     /// Alarm status to use, the first one will be assigned to new alarms
     #[arg(
         short('s'),
         long,
-        env,
+        env = "DSIEM_STATUS",
         value_name = "comma separated strings",
         use_value_delimiter = true,
         value_delimiter = ',',
@@ -82,7 +94,7 @@ pub struct ServeArgs {
     #[arg(
         short('t'),
         long,
-        env,
+        env = "DSIEM_TAGS",
         value_name = "comma separated strings",
         use_value_delimiter = true,
         value_delimiter = ',',
@@ -90,10 +102,20 @@ pub struct ServeArgs {
     )]
     tags: Vec<String>,
     /// Minimum alarm risk value to be classified as Medium risk. Lower value than this will be classified as Low risk
-    #[arg(long = "med_risk_min", value_name = "2 to 8", env, default_value_t = 3)]
+    #[arg(
+        long = "med_risk_min",
+        value_name = "2 to 8",
+        env = "DSIEM_MEDRISKMIN",
+        default_value_t = 3
+    )]
     med_risk_min: u8,
     /// Maximum alarm risk value to be classified as Medium risk. Higher value than this will be classified as High risk
-    #[arg(long = "med_risk_max", value_name = "2 to 9", env, default_value_t = 6)]
+    #[arg(
+        long = "med_risk_max",
+        value_name = "2 to 9",
+        env = "DSIEM_MEDRISKMAX",
+        default_value_t = 6
+    )]
     med_risk_max: u8,
     // Maximum expected rate of events/second
     #[arg(short('e'), long = "max_eps", value_name = "number", env, default_value_t = 1000)]
@@ -107,19 +129,42 @@ pub struct ServeArgs {
     )]
     msq: String,
     /// Cache expiration time in minutes for intel and vuln query results
-    #[arg(short('c'), long = "cache", env, value_name = "minutes", default_value_t = 10)]
+    #[arg(
+        short('c'),
+        long = "cache",
+        env = "DSIEM_CACHEDURATION",
+        value_name = "minutes",
+        default_value_t = 10
+    )]
     cache_duration: u8,
     /// Length of queue for unprocessed events, setting this to 0 will use 1,000,000 events to emulate unbounded queue
-    #[arg(short('q'), long = "max_queue", env, value_name = "events", default_value_t = 25000)]
+    #[arg(
+        short('q'),
+        long = "max_queue",
+        env = "DSIEM_MAXQUEUE",
+        value_name = "events",
+        default_value_t = 25000
+    )]
     max_queue: usize,
     /// Duration in seconds before resetting overload condition state
-    #[arg(long = "hold_duration", env, value_name = "seconds", default_value_t = 10)]
+    #[arg(
+        long = "hold_duration",
+        env = "DSIEM_HOLDDURATION",
+        value_name = "seconds",
+        default_value_t = 10
+    )]
     hold_duration: u8,
     /// Max. processing delay before throttling incoming events (under-pressure condition), 0 means disabled"
-    #[arg(short = 'd', long = "max_delay", env, value_name = "seconds", default_value_t = 180)]
+    #[arg(
+        short = 'd',
+        long = "max_delay",
+        env = "DSIEM_MAXDELAY",
+        value_name = "seconds",
+        default_value_t = 180
+    )]
     max_delay: u16,
     /// Check private IP addresses against threat intel
-    #[arg(long = "intel_private_ip", env, default_value_t = false)]
+    #[arg(long = "intel_private_ip", env = "DSIEM_INTELPRIVATEIP", default_value_t = false)]
     intel_private_ip: bool,
 }
 
@@ -135,7 +180,8 @@ fn log_startup_err(context: &str, err: Error) -> Error {
 
 async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()> {
     let args = Cli::parse();
-    let level = logger::verbosity_to_level_filter(args.verbosity);
+    let verbosity = if args.debug { 1 } else if args.trace { 2 } else { args.verbosity };
+    let level = logger::verbosity_to_level_filter(verbosity);
     let sub = logger::setup_logger(level)?;
     let log_result = tracing::subscriber::set_global_default(sub);
     if require_logging {

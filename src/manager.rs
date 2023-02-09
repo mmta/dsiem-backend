@@ -77,6 +77,10 @@ impl Manager {
             let bp_sender = bp_sender.clone();
             let report_sender = self.option.report_tx.clone();
 
+            if directive.id != 10 {
+                continue;
+            }
+
             set.spawn(async move {
                 let (sid_pairs, taxo_pairs) = rule::get_quick_check_pairs(&directive.rules);
                 let contains_pluginrule = !sid_pairs.is_empty();
@@ -169,7 +173,7 @@ impl Manager {
 
                             // new backlog, make sure the event match the first rule
                             if !first_rule.does_event_match(&assets, &event, false) {
-                                debug!("aborting new backlog creation, event doesnt match first rule");
+                                debug!(directive.id, event.id, "event doesn't match first rule");
                                 // trace!(" the first rule: {:?}, the event: {:?}", first_rule, &event);
                                 continue;
                             }

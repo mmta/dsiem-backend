@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
+use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
+use tracing::debug;
+use tracing::trace;
 use super::IntelChecker;
 use super::IntelResult;
 use async_trait::async_trait;
@@ -29,14 +32,22 @@ impl IntelChecker for Wise {
 
         // convert Wise JS object literal to valid JSON
 
-        let text = reqwest
-            ::get(url).await?
-            .text().await?
-            .replace("field:", "field")
-            .replace("len:", "len")
-            .replace("value:", "value");
+        debug!(url, "wise intel check");
 
-        let res: Vec<WiseResult> = serde_json::from_str(&text)?;
+        let text = reqwest
+            ::get(url).await
+            .context("get request error")?
+            .text().await
+            .context("error obtaining text")?
+            .replace("field:", "\"field\":")
+            .replace("len:", "\"len\":")
+            .replace("value:", "\"value\":");
+
+        trace!(text, "wise intel check");
+
+        let res: Vec<WiseResult> = serde_json
+            ::from_str(&text)
+            .context("error parsing wise result")?;
         let mut results: HashSet<IntelResult> = HashSet::new();
 
         for v in res.iter() {
@@ -59,7 +70,7 @@ impl IntelChecker for Wise {
     }
 
     fn initialize(&mut self, config: String) -> Result<()> {
-        let c = serde_json::from_str(&config)?;
+        let c = serde_json::from_str(&config).context("error parsing wise config")?;
         self.config = c;
         Ok(())
     }
