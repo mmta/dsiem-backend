@@ -10,10 +10,6 @@ jobs:
       ! contains(github.event.head_commit.message, '[skip ci]')
     steps:
       - uses: actions/checkout@v3
-      - name: setup node
-        uses: actions/setup-node@v3
-        with:
-          node-version: 16
       - name: setup rust
         uses: hecrj/setup-rust-action@v1.4.1
         with:
