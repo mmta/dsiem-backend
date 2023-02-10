@@ -566,7 +566,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dsiem-backend-rs"
+name = "dsiem-backend"
 version = "0.34.0"
 dependencies = [
  "anyhow",

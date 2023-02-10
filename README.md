@@ -15,8 +15,8 @@ For non container environment:
 - Build the binary with `cargo build --release`.
 - Review the startup parameters by running the binary with `--help`:
     ```shell
-    ./dsiem-backend-rs --help
-    ./dsiem-backend-rs serve --help
+    ./dsiem-backend --help
+    ./dsiem-backend serve --help
     ```
 - And adjust your parameters accordingly.
 

@@ -8,7 +8,7 @@ FROM alpine:edge
 RUN apk -U upgrade && apk add bash ca-certificates && rm -rf /var/cache/apk/*
 
 WORKDIR /dsiem
-COPY --from=builder /home/rust/src/ctx/target/x86_64-unknown-linux-musl/release/dsiem-backend-rs ./dsiem
+COPY --from=builder /home/rust/src/ctx/target/x86_64-unknown-linux-musl/release/dsiem-backend ./dsiem
 RUN mkdir -p configs
 
 # s6-overlay
