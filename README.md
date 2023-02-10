@@ -18,7 +18,7 @@ For non container environment:
     ./dsiem-backend --help
     ./dsiem-backend serve --help
     ```
-- And adjust your parameters accordingly.
+- And adjust your parameters accordingly. At minimum, `serve` requires you to define `-f` (frontend URL) `--msq` (NATS url), and `-n` (backend name) parameters.
 
 ## Documentation
 
@@ -32,5 +32,6 @@ Compared to Dsiem in the main repo, this binary currently:
 - Integrate `backlog` and `alarm` to one struct to reduce data duplication.
 - More simplified use of channels (with the assistance from async), particularly for backpressure control, backlog deletion, and stats reporting.
 - Overall simpler structure and easier to understand, partly because of the reduced features.
+- Doesn't default to use JSON-lines log output (enable through `-j` parameter or `DSIEM_JSON=true` env. variable).
 - Has less test coverage, and has not been thoroughly tested in production environment (this may improve).
 
