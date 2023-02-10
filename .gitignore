@@ -6,3 +6,4 @@
 /configs/directives_*
 !/configs/directives_dsiem-backend-0_testing1.json
 !/configs/directives_dsiem-backend-1_testing1.json
+/report.*
