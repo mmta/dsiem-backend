@@ -1,5 +1,7 @@
 # Dsiem backend
 
+[![CI](https://github.com/mmta/dsiem-backend/actions/workflows/publish.yml/badge.svg)](https://github.com/mmta/dsiem-backend/actions/workflows/publish.yml) [![codecov](https://codecov.io/gh/mmta/dsiem-backend/branch/master/graph/badge.svg?token=GFF0LCZDO2)](https://codecov.io/gh/mmta/dsiem-backend)
+
 An implementation of [Dsiem](https://github.com/defenxor/dsiem) backend-only mode in Rust. The goals are:
 
 - Evaluate different runtimes (e.g. go vs tokio) specific to Dsiem use case.
