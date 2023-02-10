@@ -542,6 +542,27 @@ mod test {
     use table_test::table_test;
 
     #[test]
+    fn test_serde() {
+        let mut r = DirectiveRule::default();
+        let s = serde_json::to_string(&r).unwrap();
+        let s_ref =
+            r#"{"name":"","stage":0,"plugin_id":0,"plugin_sid":[],"occurrence":0,"from":"","to":"","type":"","port_from":"","port_to":"","protocol":"","reliability":0,"timeout":0}"#;
+        assert_eq!(s, s_ref);
+        let r2: DirectiveRule = serde_json::from_str(s_ref).unwrap();
+        assert!(r2.rule_type == RuleType::UnsupportedType);
+        r.rule_type = RuleType::PluginRule;
+        let s = serde_json::to_string(&r).unwrap();
+        let s_ref =
+            r#"{"name":"","stage":0,"plugin_id":0,"plugin_sid":[],"occurrence":0,"from":"","to":"","type":"PluginRule","port_from":"","port_to":"","protocol":"","reliability":0,"timeout":0}"#;
+        assert_eq!(s, s_ref);
+        r.rule_type = RuleType::TaxonomyRule;
+        let s = serde_json::to_string(&r).unwrap();
+        let s_ref =
+            r#"{"name":"","stage":0,"plugin_id":0,"plugin_sid":[],"occurrence":0,"from":"","to":"","type":"TaxonomyRule","port_from":"","port_to":"","protocol":"","reliability":0,"timeout":0}"#;
+        assert_eq!(s, s_ref);
+    }
+
+    #[test]
     fn test_get_quick_check_pairs() {
         let r1 = DirectiveRule {
             plugin_id: 1,
@@ -563,13 +584,17 @@ mod test {
             .filter(|v| v.plugin_id == 1 && v.plugin_sid == vec![1, 2, 3])
             .last();
         assert!(v.is_some());
+        let v2 = v.clone().unwrap();
+        assert_eq!(v.unwrap().plugin_id, v2.plugin_id);
         let v = q
             .into_iter()
             .filter(|v| v.product == vec!["checkpoint"] && v.category == "firewall")
             .last();
         assert!(v.is_some());
+        let v2 = v.clone().unwrap();
+        assert_eq!(v.unwrap().product, v2.product);
         let (_, q) = get_quick_check_pairs(&vec![r1]);
-        assert!(q.is_empty())
+        assert!(q.is_empty());
     }
     #[test]
     fn test_quick_check_plugin_rule() {
