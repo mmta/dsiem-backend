@@ -11,10 +11,9 @@ use anyhow::Result;
 
 #[derive(PartialEq, Clone, Debug, Default)]
 pub enum RuleType {
+    #[default]
     PluginRule,
     TaxonomyRule,
-    #[default]
-    UnsupportedType,
 }
 
 impl serde::Serialize for RuleType {
@@ -22,7 +21,6 @@ impl serde::Serialize for RuleType {
         serializer.serialize_str(match *self {
             RuleType::PluginRule => "PluginRule",
             RuleType::TaxonomyRule => "TaxonomyRule",
-            RuleType::UnsupportedType => "",
         })
     }
 }
@@ -30,11 +28,14 @@ impl serde::Serialize for RuleType {
 impl<'de> serde::Deserialize<'de> for RuleType {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error> where D: Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
-        Ok(match s.as_str() {
+        let res = match s.as_str() {
             "PluginRule" => RuleType::PluginRule,
             "TaxonomyRule" => RuleType::TaxonomyRule,
-            &_ => RuleType::UnsupportedType,
-        })
+            &_ => {
+                return Err(serde::de::Error::custom("invalid rule type"));
+            }
+        };
+        Ok(res)
     }
 }
 
@@ -42,7 +43,13 @@ impl<'de> serde::Deserialize<'de> for RuleType {
 pub struct DirectiveRule {
     pub name: String,
     pub stage: u8,
+    pub occurrence: usize,
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
     pub plugin_id: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub plugin_sid: Vec<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
@@ -53,9 +60,6 @@ pub struct DirectiveRule {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
     pub subcategory: Vec<String>,
-    pub occurrence: usize,
-    pub from: String,
-    pub to: String,
     #[serde(rename(deserialize = "type", serialize = "type"))]
     pub rule_type: RuleType,
     pub port_from: String,
@@ -119,10 +123,8 @@ impl DirectiveRule {
     ) -> bool {
         if self.rule_type == RuleType::PluginRule {
             plugin_rule_check(self, a, e, mut_sdiff)
-        } else if self.rule_type == RuleType::TaxonomyRule {
-            taxonomy_rule_check(self, a, e, mut_sdiff)
         } else {
-            false
+            taxonomy_rule_check(self, a, e, mut_sdiff)
         }
     }
 
@@ -546,19 +548,19 @@ mod test {
         let mut r = DirectiveRule::default();
         let s = serde_json::to_string(&r).unwrap();
         let s_ref =
-            r#"{"name":"","stage":0,"plugin_id":0,"plugin_sid":[],"occurrence":0,"from":"","to":"","type":"","port_from":"","port_to":"","protocol":"","reliability":0,"timeout":0}"#;
+            r#"{"name":"","stage":0,"occurrence":0,"from":"","to":"","plugin_id":0,"type":"PluginRule","port_from":"","port_to":"","protocol":"","reliability":0,"timeout":0}"#;
         assert_eq!(s, s_ref);
         let r2: DirectiveRule = serde_json::from_str(s_ref).unwrap();
-        assert!(r2.rule_type == RuleType::UnsupportedType);
+        assert!(r2.rule_type == RuleType::PluginRule);
         r.rule_type = RuleType::PluginRule;
         let s = serde_json::to_string(&r).unwrap();
         let s_ref =
-            r#"{"name":"","stage":0,"plugin_id":0,"plugin_sid":[],"occurrence":0,"from":"","to":"","type":"PluginRule","port_from":"","port_to":"","protocol":"","reliability":0,"timeout":0}"#;
+            r#"{"name":"","stage":0,"occurrence":0,"from":"","to":"","plugin_id":0,"type":"PluginRule","port_from":"","port_to":"","protocol":"","reliability":0,"timeout":0}"#;
         assert_eq!(s, s_ref);
         r.rule_type = RuleType::TaxonomyRule;
         let s = serde_json::to_string(&r).unwrap();
         let s_ref =
-            r#"{"name":"","stage":0,"plugin_id":0,"plugin_sid":[],"occurrence":0,"from":"","to":"","type":"TaxonomyRule","port_from":"","port_to":"","protocol":"","reliability":0,"timeout":0}"#;
+            r#"{"name":"","stage":0,"occurrence":0,"from":"","to":"","plugin_id":0,"type":"TaxonomyRule","port_from":"","port_to":"","protocol":"","reliability":0,"timeout":0}"#;
         assert_eq!(s, s_ref);
     }
 
@@ -784,8 +786,8 @@ mod test {
         r8.subcategory = vec!["Firewall Allow".to_string()];
 
         // unsupported type
-        let mut r9 = r1.clone();
-        r9.rule_type = RuleType::UnsupportedType;
+        // let mut r9 = r1.clone();
+        // r9.rule_type = RuleType::UnsupportedType;
 
         // from and to
         let mut e2 = e1.clone();
@@ -979,7 +981,7 @@ mod test {
             ((6, e1.clone(), r6), false),
             ((7, e1.clone(), r7), true),
             ((8, e1.clone(), r8), false),
-            ((9, e1.clone(), r9), false),
+            // ((9, e1.clone(), r9), false),
             ((10, e2, r10), false),
             ((11, e1.clone(), r11), false),
             ((12, e1.clone(), r12), false),

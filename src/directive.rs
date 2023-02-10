@@ -15,7 +15,7 @@ use crate::{
 
 const DIRECTIVES_GLOB: &str = "directives_*.json";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct Directive {
     pub id: u64,
     pub name: String,
@@ -152,6 +152,9 @@ fn validate_rules(rules: &Vec<rule::DirectiveRule>) -> Result<()> {
                     return Err(anyhow!("rule stage {} plugin_sid must be >= 1", r.stage));
                 }
             }
+            if r.plugin_sid.is_empty() {
+                return Err(anyhow!("plugin_sid cannot be empty"));
+            }
         }
         if r.rule_type == RuleType::TaxonomyRule {
             if r.product.is_empty() {
@@ -212,7 +215,7 @@ fn validate_fromto(s: String, is_first_rule: bool, highest_stage: u8) -> Result<
     let slices: Vec<&str> = s.split(',').collect();
     for str in slices {
         let mut s = str.to_string();
-        s = s.replace('!', "");
+        s = s.replace('!', "").trim().to_string();
         cidr::AnyIpCidr::from_str(&s).map_err(|e| format!("{s}: {e}"))?;
     }
 
@@ -234,6 +237,7 @@ fn validate_port(s: String, is_first_rule: bool, highest_stage: u8) -> Result<()
     for s in slices {
         let n = s
             .replace('!', "")
+            .trim()
             .parse::<u16>()
             .map_err(|e| e.to_string())?;
         if !(1..=65535).contains(&n) {
@@ -291,8 +295,8 @@ fn validate_directive(d: &Directive, loaded: &Vec<Directive>) -> Result<()> {
     Ok(())
 }
 
-pub fn load_directives(test_env: bool) -> Result<Vec<Directive>> {
-    let cfg_dir = utils::config_dir(test_env)?;
+pub fn load_directives(test_env: bool, sub_path: Option<Vec<String>>) -> Result<Vec<Directive>> {
+    let cfg_dir = utils::config_dir(test_env, sub_path)?;
     let glob_pattern = cfg_dir.to_string_lossy().to_string() + "/" + DIRECTIVES_GLOB;
     let mut dirs = Directives { directives: vec![] };
     for file_path in glob(&glob_pattern)?.flatten() {
@@ -310,4 +314,79 @@ pub fn load_directives(test_env: bool) -> Result<Vec<Directive>> {
         info!("{} directives found and loaded", dirs.directives.len());
     }
     Ok(dirs.directives)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_load_directives() {
+        let res = load_directives(
+            true,
+            Some(vec!["directives".to_owned(), "directive1".to_owned()])
+        );
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().to_string(), "directive ID 1 already exist");
+
+        let dir2_path = vec!["directives".to_owned(), "directive2".to_owned()];
+
+        for n in 1..29 {
+            let mut dir = dir2_path.clone();
+            dir.push(n.to_string());
+            let res = load_directives(true, Some(dir.clone()));
+            println!("directory is: {:?}", dir.clone());
+
+            if let Ok(v) = res {
+                // only for 28
+                assert!(v.first().unwrap().disabled);
+            } else {
+                let s = res.unwrap_err().to_string();
+                match n {
+                    1 => assert!(s.contains("missing field `rules`")),
+                    2 => assert!(s.contains("kingdom is empty")),
+                    3 => assert!(s.contains("priority must be between 1 to 5")),
+                    4 => assert!(s.contains("invalid value: integer `-1`")),
+                    5 => assert!(s.contains("invalid rule type")),
+                    6 => assert!(s.contains("rule stage 1 plugin_id must be >= 1")),
+                    7 => assert!(s.contains("plugin_sid cannot be empty")),
+                    8 => assert!(s.contains("plugin_sid must be >= 1")),
+                    9 => assert!(s.contains("requires product to be defined")),
+                    10 => assert!(s.contains("requires category to be defined")),
+                    11 => assert!(s.contains("invalid IP address syntax")),
+                    12 => assert!(s.contains("missing field `to`")),
+                    13 => assert!(s.contains("port_from is invalid")),
+                    14 => assert!(s.contains("port_to is invalid")),
+                    15 => assert!(s.contains("rule stage cannot be zero")),
+                    16 => assert!(s.contains("duplicate rule stage")),
+                    17 => assert!(s.contains("rule stage 1 must have occurrence = 1")),
+                    18 => assert!(s.contains("name is empty")),
+                    19 => assert!(s.contains("category is empty")),
+                    20 => assert!(s.contains("will never expire")),
+                    21 => assert!(s.contains("reliability must be between 0 to 10")),
+                    22 => assert!(s.contains("empty string")),
+                    23 => assert!(s.contains("first rule cannot have reference")),
+                    24 => assert!(s.contains("first rule cannot have reference")),
+                    25 => assert!(s.contains("is not a valid reference")),
+                    26 => assert!(s.contains("is not a valid reference")),
+                    _ => assert!(s.contains("cannot load any directive")),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_init_backlog_rules() {
+        let dir_path = vec!["directives".to_owned(), "directive2".to_owned(), "28".to_owned()];
+        let o = load_directives(true, Some(dir_path)).unwrap();
+        let d = o.first().unwrap();
+        let e = NormalizedEvent {
+            src_ip: "192.168.0.1".parse().unwrap(),
+            dst_ip: "8.8.8.1".parse().unwrap(),
+
+            ..Default::default()
+        };
+        let res = d.init_backlog_rules(&e);
+        assert!(res.is_ok());
+    }
 }
