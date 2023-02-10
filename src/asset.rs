@@ -45,7 +45,7 @@ impl NetworkAssets {
         Ok(result)
     }
     pub fn new(test_env: bool) -> Result<NetworkAssets> {
-        let cfg_dir = utils::config_dir(test_env)?;
+        let cfg_dir = utils::config_dir(test_env, None)?;
         let glob_pattern = cfg_dir.to_string_lossy().to_string() + "/" + ASSETS_GLOB;
         let mut result = NetworkAssets { assets: vec![], whitelist: vec![], home_net: vec![] };
         for file_path in glob(&glob_pattern)?.flatten() {
@@ -165,5 +165,14 @@ mod test {
         a.value = 5;
         a.name = "".to_string();
         assert_eq!(validate_asset(&a).unwrap_err().to_string(), "asset name cannot be empty");
+
+        let ip2: IpAddr = "2002:c0a8:0001:0:0:0:0:1".parse().unwrap();
+        assert!(assets.is_in_homenet(&ip2));
+        let name = assets.get_name(&ip2).unwrap();
+        assert_eq!(name, "firewall-ipv6".to_string());
+        assert_eq!(assets.get_value(&ip2), 5);
+
+        let net = assets.get_asset_networks(&ip2).unwrap();
+        assert_eq!(net, vec!["2002:c0a8:1::/64".to_string()])
     }
 }
