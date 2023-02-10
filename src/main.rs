@@ -280,7 +280,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     )??;
 
     let directives = directive
-        ::load_directives(test_env)
+        ::load_directives(test_env, None)
         .map_err(|e| log_startup_err("loading directives", e))?;
 
     let intels = Arc::new(

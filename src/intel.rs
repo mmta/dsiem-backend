@@ -85,7 +85,7 @@ impl IntelPlugin {
 }
 
 pub fn load_intel(test_env: bool) -> Result<IntelPlugin> {
-    let cfg_dir = utils::config_dir(test_env)?;
+    let cfg_dir = utils::config_dir(test_env, None)?;
     let glob_pattern = cfg_dir.to_string_lossy().to_string() + "/" + INTEL_GLOB;
     let mut intels = vec![];
     let mut checkers: Vec<Box<dyn IntelChecker>> = vec![];

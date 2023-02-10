@@ -26,7 +26,7 @@ async fn list_config_files(frontend_url: String) -> Result<Vec<ConfigFile>> {
 }
 
 pub async fn download_files(test_env: bool, frontend_url: String, node_name: String) -> Result<()> {
-    let config_dir = utils::config_dir(test_env)?.to_string_lossy().to_string();
+    let config_dir = utils::config_dir(test_env, None)?.to_string_lossy().to_string();
     let files = list_config_files(frontend_url.clone()).await?;
     for f in files
         .into_iter()
