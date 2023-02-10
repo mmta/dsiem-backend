@@ -16,5 +16,5 @@ genhtml -o $dir $dir/lcov.info
 
 [ "$1" == "serve" ] && {
   cd $dir
-  python3 -m http.server
+  python3 -m http.server $2
 } || exit 0
