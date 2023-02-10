@@ -1,7 +1,7 @@
 // ch chan<- event.NormalizedEvent, msq string, msqPrefix string, nodeName string, confDir string, frontend string
 
 use std::{ sync::Arc, time::Duration };
-use futures::StreamExt;
+use futures_lite::StreamExt;
 use tokio::{ sync::{ broadcast::{ Sender, self }, oneshot, mpsc }, time::interval };
 use std::str;
 
