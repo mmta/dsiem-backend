@@ -45,6 +45,15 @@ struct Cli {
     /// Enable trace output, for compatibility purpose
     #[arg(long = "trace", env = "DSIEM_TRACE", value_name = "boolean", default_value_t = false)]
     pub trace: bool,
+    /// Enable json-lines log output
+    #[arg(
+        short('j'),
+        long = "json",
+        env = "DSIEM_JSON",
+        value_name = "boolean",
+        default_value_t = false
+    )]
+    pub use_json: bool,
 }
 
 #[derive(Subcommand)]
@@ -182,8 +191,13 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     let args = Cli::parse();
     let verbosity = if args.debug { 1 } else if args.trace { 2 } else { args.verbosity };
     let level = logger::verbosity_to_level_filter(verbosity);
+    let sub_json = logger::setup_logger_json(level)?;
     let sub = logger::setup_logger(level)?;
-    let log_result = tracing::subscriber::set_global_default(sub);
+    let log_result = if args.use_json {
+        tracing::subscriber::set_global_default(sub_json)
+    } else {
+        tracing::subscriber::set_global_default(sub)
+    };
     if require_logging {
         log_result?;
     }
