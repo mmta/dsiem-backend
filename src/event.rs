@@ -79,3 +79,31 @@ impl NormalizedEvent {
             (!self.product.is_empty() && !self.category.is_empty())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_event() {
+        let mut e = NormalizedEvent {
+            id: "foo".to_owned(),
+            plugin_id: 1001,
+            plugin_sid: 1,
+            ..Default::default()
+        };
+        let e2 = e.clone();
+        assert!(e.id == e2.id);
+
+        assert!(e.valid());
+        e.plugin_id = 0;
+        assert!(!e.valid());
+        e.product = "iptables".to_owned();
+        e.category = "Firewall".to_owned();
+        assert!(e.valid());
+
+        let s = r#"{"event_id":"bar", "timestamp": "2023-01-01T00:00:00Z","src_ip":"10.0.0.3", "dst_ip":"0.0.0.0", "src_port": 80, "dst_port": 0, "sensor": "foo", "protocol":"TCP" }"#;
+        let e3: NormalizedEvent = serde_json::from_str(s).unwrap();
+        assert!(!e3.valid());
+    }
+}
