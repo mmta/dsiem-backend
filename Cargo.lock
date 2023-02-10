@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "dsiem-backend-rs"
-version = "0.33.6"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "async-nats",

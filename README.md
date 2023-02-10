@@ -1,12 +1,34 @@
 # Dsiem backend
 
-This is an implementation of [Dsiem](https://github.com/defenxor/dsiem) backend-only mode in Rust. 
+An implementation of [Dsiem](https://github.com/defenxor/dsiem) backend-only mode in Rust. The goals are:
 
-# Differences
+- Evaluate different runtimes (e.g. go vs tokio) specific to Dsiem use case.
+- Identify optimization opportunities for the code in Dsiem main repo.
 
-Compared to Dsiem binary from the main repo, this binary currently:
+## Usage
+
+For docker/container environment: Just replace your existing backend image location from `defenxor/dsiem` to `mmta/dsiem-backend`, all backend related environment variables are accepted and should work as intended.
+
+For non container environment:
+- Build the binary with `cargo build --release`.
+- Review the startup parameters by running the binary with `--help`:
+    ```shell
+    ./dsiem-backend-rs --help
+    ./dsiem-backend-rs serve --help
+    ```
+- And adjust your parameters accordingly.
+
+## Documentation
+
+Refer to the [documentation](https://github.com/defenxor/dsiem/tree/master/docs) in dsiem main repo.
+
+## Differences with dsiem main repo binary
+
+Compared to Dsiem in the main repo, this binary currently:
 
 - Doesn't implement vulnerability check plugin, only intel check plugin is available.
 - Integrate `backlog` and `alarm` to one struct to reduce data duplication.
-- More simplified use of channels (with the assistance from async), particularly for backpressure control and backlog deletion.
+- More simplified use of channels (with the assistance from async), particularly for backpressure control, backlog deletion, and stats reporting.
 - Overall simpler structure and easier to understand, partly because of the reduced features.
+- Has less test coverage, and has not been thoroughly tested in production environment (this may improve).
+
