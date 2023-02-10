@@ -32,7 +32,10 @@ mod test {
         assert!(level == LevelFilter::INFO);
         let level = verbosity_to_level_filter(1);
         assert!(level == LevelFilter::DEBUG);
+        let sub = setup_logger_json(level).unwrap();
+        let _g = tracing::subscriber::set_default(sub);
         let sub = setup_logger(level).unwrap();
-        tracing::subscriber::set_global_default(sub).unwrap();
+        let res = tracing::subscriber::set_global_default(sub);
+        assert!(res.is_ok());
     }
 }
