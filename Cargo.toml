@@ -11,10 +11,10 @@ panic = "abort"
 lto = true
 
 [dependencies]
-serde = { version = "1.0.152", features = ["rc"] }
-serde_json = "1.0.91"
-tracing = "0.1.37"
-tracing-subscriber = { version = "0.3.16", features = ["json"] }
+serde = { version = "1.0.152", features = ["rc"], default-features = false }
+serde_json = { version = "1.0.91", default-features = false }
+tracing = { version = "0.1.37", default-features = false }
+tracing-subscriber = { version = "0.3.16", features = ["json"], default-features = false }
 serde_derive = "1.0.152"
 serde_repr = "0.1"
 glob = "0.3.1"
@@ -22,22 +22,21 @@ regex = "1.7.1"
 cidr = { version = "0.2.1", features = ["serde"] }
 tokio = { version = "1.25.0", features = ["sync"] }
 nats = "0.23.1"
-chrono = { version = "0.4.23", features = ["serde"] }
+chrono = { version = "0.4.23", features = ["serde", "clock" ], default-features = false }
 async-nats = "0.27.0"
 reqwest = "0.11.14"
 anyhow = "1.0.68"
 nanoid = "0.4.0"
 clap = { version = "4.1.4", features = ["help", "std", "derive", "env" ], optional = false, default-features = false}
-futures = "0.3.26"
 tracing-appender = "0.2.2"
 parking_lot = { version = "0.12.1", features = ["serde"], optional = false, default-features = false }
-moka = "0.9.6"
+moka = { version = "0.9.6", features = ["sync"], default-features = false }
 ip_rfc = "0.1.0"
 async-trait = "0.1.64"
 openssl = { version = "0.10", features = ["vendored"] }
 metered = { git = "https://github.com/nhawkes/metered-rs", branch = "master" }
 ctrlc = { version = "3.2.5", features = ["termination"] }
-tokio-stream = "0.1.11"
+futures-lite = "1.12.0"
 
 [dev-dependencies]
 table-test = "0.2.1"
