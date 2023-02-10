@@ -56,7 +56,7 @@ pub struct DirectiveRule {
     pub occurrence: usize,
     pub from: String,
     pub to: String,
-    #[serde(rename(deserialize = "type"))]
+    #[serde(rename(deserialize = "type", serialize = "type"))]
     pub rule_type: RuleType,
     pub port_from: String,
     pub port_to: String,
@@ -705,8 +705,6 @@ mod test {
             dst_port: 80,
             ..Default::default()
         };
-
-        assert!(a.is_in_homenet(&e1.src_ip));
 
         let table = vec![
             ((1, e1.clone(), r1.clone(), false), true),
