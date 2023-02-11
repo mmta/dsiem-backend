@@ -75,3 +75,58 @@ fn round(x: f64, decimals: u32) -> f64 {
     let y = (10i64).pow(decimals) as f64;
     (x * y).round() / y
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use tokio::{ time::sleep, task };
+    use tracing_test::traced_test;
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_watchdog() {
+        let (event_tx, event_rx) = broadcast::channel::<NormalizedEvent>(5);
+        let (resptime_tx, resptime_rx) = mpsc::channel::<Duration>(1);
+        let (report_tx, report_rx) = mpsc::channel::<ManagerReport>(1);
+        let (cancel_tx, _) = broadcast::channel::<()>(5);
+        let report_interval = 1;
+        let max_eps = 1000;
+
+        let opt = WatchdogOpt {
+            event_tx: event_tx.clone(),
+            event_rx,
+            resptime_rx,
+            report_rx,
+            cancel_tx: cancel_tx.clone(),
+            report_interval,
+            max_eps,
+        };
+
+        let _detached = task::spawn(async {
+            let w = Watchdog::default();
+            _ = w.start(opt).await;
+        });
+        _ = resptime_tx.send(Duration::from_millis(100)).await;
+        _ = resptime_tx.send(Duration::from_millis(100)).await;
+        _ = resptime_tx.send(Duration::from_millis(25)).await;
+        sleep(Duration::from_millis(2000)).await;
+        assert!(logs_contain("avg_proc_time_ms=75.0"));
+        for _ in 0..30000 {
+            _ = event_tx.send(NormalizedEvent::default());
+        }
+        _ = resptime_tx.send(Duration::from_millis(10000)).await;
+        sleep(Duration::from_millis(2000)).await;
+        assert!(logs_contain("processing time maybe too long"));
+
+        let rpt = ManagerReport {
+            id: 1,
+            active_backlogs: 100,
+        };
+        _ = report_tx.send(rpt).await;
+        sleep(Duration::from_millis(2000)).await;
+        assert!(logs_contain("avg_proc_time_ms=75.0"));
+        cancel_tx.send(()).unwrap();
+        sleep(Duration::from_millis(2000)).await;
+        assert!(logs_contain("cancel signal received"));
+    }
+}
