@@ -28,7 +28,6 @@ Refer to the [documentation](https://github.com/defenxor/dsiem/tree/master/docs)
 
 Compared to Dsiem in the main repo, this binary currently:
 
-- Doesn't implement vulnerability check plugin, only intel check plugin is available.
 - Integrate `backlog` and `alarm` to one struct to reduce data duplication.
 - More simplified use of channels (with the assistance from async), particularly for backpressure control, backlog deletion, and stats reporting.
 - Overall simpler structure and easier to understand, partly because of the reduced features.

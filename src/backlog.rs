@@ -24,6 +24,7 @@ use crate::{
     asset::NetworkAssets,
     utils,
     intel::{ IntelPlugin, IntelResult },
+    vuln::{ VulnPlugin, VulnResult },
 };
 use anyhow::{ Result, Context, anyhow };
 
@@ -73,6 +74,8 @@ pub struct Backlog {
     #[serde(skip_serializing_if = "is_locked_data_empty")]
     pub intel_hits: RwLock<HashSet<IntelResult>>,
     #[serde(skip_serializing_if = "is_locked_data_empty")]
+    pub vulnerabilities: RwLock<HashSet<VulnResult>>,
+    #[serde(skip_serializing_if = "is_locked_data_empty")]
     pub custom_data: RwLock<HashSet<CustomData>>,
     #[serde(skip_serializing)]
     pub current_stage: RwLock<u8>,
@@ -108,6 +111,8 @@ pub struct Backlog {
     pub med_risk_max: u8,
     #[serde(skip_serializing)]
     pub intels: Option<Arc<IntelPlugin>>,
+    #[serde(skip_serializing)]
+    pub vulns: Option<Arc<VulnPlugin>>,
     #[serde(skip_serializing)]
     pub intel_private_ip: bool,
     #[serde(skip_serializing)]
@@ -164,7 +169,8 @@ impl Default for FoundChannel {
 pub struct BacklogOpt<'a> {
     pub directive: &'a Directive,
     pub asset: Arc<NetworkAssets>,
-    pub intel: Arc<IntelPlugin>,
+    pub intels: Arc<IntelPlugin>,
+    pub vulns: Arc<VulnPlugin>,
     pub event: &'a NormalizedEvent,
     pub bp_tx: Sender<()>,
     pub delete_tx: Sender<()>,
@@ -224,7 +230,8 @@ impl Backlog {
             .open(log_dir.join(ALARM_LOG)).await?;
         backlog.alarm_writer = TokioRwLock::new(Some(file));
 
-        backlog.intels = Some(o.intel);
+        backlog.intels = Some(o.intels);
+        backlog.vulns = Some(o.vulns);
 
         info!(
             directive_id = o.directive.id,
@@ -646,10 +653,14 @@ impl Backlog {
     }
 
     fn set_ports(&self, e: &NormalizedEvent) {
-        let mut w = self.last_srcport.write();
-        *w = e.src_port;
-        let mut w = self.last_dstport.write();
-        *w = e.dst_port;
+        if e.src_port != 0 {
+            let mut w = self.last_srcport.write();
+            *w = e.src_port;
+        }
+        if e.dst_port != 0 {
+            let mut w = self.last_dstport.write();
+            *w = e.dst_port;
+        }
     }
     fn set_update_time(&self) {
         let mut w = self.update_time.write();
@@ -726,15 +737,21 @@ impl Backlog {
         self.set_created_time();
         self.update_networks();
 
-        if check_intvuln && self.intels.is_some() {
-            debug!(self.id, "querying threat intel plugins");
-            // dont fail alarm update if there's intel check err
-            _ = self
-                .check_intel().await
-                .map_err(|e| { error!(self.id, "intel check error: {:?}", e) });
-        } else {
-            let is_intels = self.intels.is_some();
-            debug!(self.id, check_intvuln, is_intels, "not checking intel");
+        if check_intvuln {
+            if self.intels.is_some() {
+                debug!(self.id, "querying threat intel plugins");
+                // dont fail alarm update if there's intel check err
+                _ = self
+                    .check_intel().await
+                    .map_err(|e| { error!(self.id, "intel check error: {:?}", e) });
+            }
+            if self.vulns.is_some() {
+                debug!(self.id, "querying vulnerability check plugins");
+                // dont fail alarm update if there's intel check err
+                _ = self
+                    .check_vuln().await
+                    .map_err(|e| { error!(self.id, "vuln check error: {:?}", e) });
+            }
         }
 
         let s = serde_json::to_string(&self)? + "\n";
@@ -762,5 +779,75 @@ impl Backlog {
         debug!(self.id, "found {} new intel matches", difference.count());
         *w = res;
         Ok(())
+    }
+
+    async fn check_vuln(&self) -> Result<()> {
+        let vulns = self.vulns.as_ref().ok_or_else(|| anyhow!("vulns is none"))?;
+
+        let mut vs = VulnSearchTerm::default();
+        for r in self.rules.iter() {
+            let ips: HashSet<&str> = r.from.split(',').collect();
+            let ports: HashSet<&str> = r.port_from.split(',').collect();
+            let port = *self.last_srcport.read();
+            vs.add(ips, ports, port);
+            let ips: HashSet<&str> = r.to.split(',').collect();
+            let ports: HashSet<&str> = r.port_to.split(',').collect();
+            let port = *self.last_dstport.read();
+            vs.add(ips, ports, port);
+        }
+
+        let mut combined: HashSet<VulnResult> = HashSet::new();
+        for term in vs.terms {
+            let ip = term.0;
+            let port = term.1;
+            debug!(self.id, "vulnerability check for {}:{}", ip, port);
+            let s = ip.to_string() + ":" + &port.to_string();
+            {
+                let r = self.vulnerabilities.read();
+                let found = r
+                    .iter()
+                    .filter(|v| v.term == s)
+                    .last();
+                if found.is_some() {
+                    continue;
+                }
+            }
+            let res = vulns.run_checkers(ip, port).await?;
+            combined.extend(res);
+        }
+
+        let mut w = self.vulnerabilities.write();
+        if combined == *w {
+            debug!(self.id, "no new vulnerability match found");
+            return Ok(());
+        }
+        let difference = combined.difference(&w);
+        debug!(self.id, "found {} new vulnerability matches", difference.count());
+        *w = combined;
+        Ok(())
+    }
+}
+
+#[derive(Default, Debug)]
+struct VulnSearchTerm {
+    terms: HashSet<(IpAddr, u16)>,
+}
+
+impl VulnSearchTerm {
+    fn add(&mut self, ip_set: HashSet<&str>, ports: HashSet<&str>, evt_port: u16) {
+        for z in ip_set {
+            if let Ok(ip) = z.parse::<IpAddr>() {
+                if evt_port != 0 {
+                    self.terms.insert((ip, evt_port));
+                }
+                for y in ports.clone() {
+                    if let Ok(port) = y.parse::<u16>() {
+                        if port != 0 {
+                            self.terms.insert((ip, port));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
