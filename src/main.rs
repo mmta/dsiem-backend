@@ -20,6 +20,7 @@ mod intel;
 mod logger;
 mod utils;
 mod config;
+mod vuln;
 
 const REPORT_INTERVAL_IN_SECONDS: u64 = 10;
 
@@ -287,6 +288,10 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         intel::load_intel(test_env).map_err(|e| log_startup_err("loading intels", e))?
     );
 
+    let vulns = Arc::new(
+        vuln::load_vuln(test_env).map_err(|e| log_startup_err("loading vulns", e))?
+    );
+
     let (report_tx, report_rx) = mpsc::channel::<manager::ManagerReport>(directives.len());
 
     let watchdog_handle = task::spawn({
@@ -314,6 +319,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         directives,
         assets,
         intels,
+        vulns,
         max_delay,
         min_alarm_lifetime,
         backpressure_tx: bp_tx,

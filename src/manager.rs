@@ -9,6 +9,7 @@ use crate::{
     rule,
     backlog::{ self, Backlog, BacklogState },
     intel::IntelPlugin,
+    vuln::VulnPlugin,
 };
 
 use anyhow::{ Result, anyhow };
@@ -29,6 +30,7 @@ pub struct ManagerOpt {
     pub directives: Vec<Directive>,
     pub assets: Arc<NetworkAssets>,
     pub intels: Arc<IntelPlugin>,
+    pub vulns: Arc<VulnPlugin>,
     pub intel_private_ip: bool,
     pub max_delay: i64,
     pub min_alarm_lifetime: i64,
@@ -61,6 +63,7 @@ impl Manager {
         for directive in self.option.directives {
             let assets = self.option.assets.clone();
             let intels = self.option.intels.clone();
+            let vulns = self.option.vulns.clone();
             let sender = self.option.publisher.clone();
             let default_status = self.option.default_status.clone();
             let default_tag = self.option.default_tag.clone();
@@ -183,7 +186,8 @@ impl Manager {
                                 asset: assets.clone(),
                                 bp_tx: bp_sender.clone(),
                                 delete_tx: mgr_delete_tx.clone(),
-                                intel: intels.clone(),
+                                intels: intels.clone(),
+                                vulns: vulns.clone(),
                                 min_alarm_lifetime: self.option.min_alarm_lifetime,
                                 default_status: default_status.clone(),
                                 default_tag: default_tag.clone(),
