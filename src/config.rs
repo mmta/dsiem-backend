@@ -55,10 +55,11 @@ pub async fn download_files(
 
 #[cfg(test)]
 mod test {
+    use tokio::join;
     use tracing_test::traced_test;
 
     use super::*;
-    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    #[tokio::test(flavor = "multi_thread")]
     #[traced_test]
     async fn test_config() {
         let mut server = mockito::Server::new_async().await;
@@ -88,22 +89,23 @@ mod test {
                 .mock("GET", "/config/")
                 .with_status(200)
                 .with_body(file_list)
-                .create_async().await;
+                .create_async();
             let _m2 = server
                 .mock("GET", "/config/assets_foo.json")
                 .with_status(200)
                 .with_body("{}")
-                .create_async().await;
+                .create_async();
             let _m3 = server
                 .mock("GET", "/config/intel_bar.json")
                 .with_status(200)
                 .with_body("{}")
-                .create_async().await;
+                .create_async();
             let _m4 = server
                 .mock("GET", "/config/vuln_baz.json")
                 .with_status(200)
                 .with_body("{}")
-                .create_async().await;
+                .create_async();
+            join!(_m1, _m2, _m3, _m4);
         });
 
         let config_files = list_config_files(url.clone()).await.unwrap();
