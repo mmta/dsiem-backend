@@ -245,7 +245,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     })?;
 
     config
-        ::download_files(test_env, sargs.frontend, sargs.node).await
+        ::download_files(test_env, None, sargs.frontend, sargs.node).await
         .map_err(|e| log_startup_err("downloading config", e))?;
 
     let assets = Arc::new(

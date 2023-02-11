@@ -25,8 +25,13 @@ async fn list_config_files(frontend_url: String) -> Result<Vec<ConfigFile>> {
     Ok(c.files)
 }
 
-pub async fn download_files(test_env: bool, frontend_url: String, node_name: String) -> Result<()> {
-    let config_dir = utils::config_dir(test_env, None)?.to_string_lossy().to_string();
+pub async fn download_files(
+    test_env: bool,
+    subdir: Option<Vec<String>>,
+    frontend_url: String,
+    node_name: String
+) -> Result<()> {
+    let config_dir = utils::config_dir(test_env, subdir)?.to_string_lossy().to_string();
     let files = list_config_files(frontend_url.clone()).await?;
     for f in files
         .into_iter()
@@ -46,4 +51,70 @@ pub async fn download_files(test_env: bool, frontend_url: String, node_name: Str
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use tracing_test::traced_test;
+
+    use super::*;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    #[traced_test]
+    async fn test_config() {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+        debug!("using url: {}", url.clone());
+        tokio::spawn(async move {
+            let _m1 = server.mock("GET", "/config/").with_status(418).create_async().await;
+        });
+
+        let res = list_config_files(url).await;
+        assert!(res.is_err());
+
+        let file_list =
+            r#"{ 
+                "files" : [
+                  {"filename" : "assets_foo.json"},
+                  {"filename" : "intel_bar.json"},
+                  {"filename" : "vuln_baz.json"}
+                ] 
+            }"#;
+
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+        debug!("using url: {}", url.clone());
+        tokio::spawn(async move {
+            let _m1 = server
+                .mock("GET", "/config/")
+                .with_status(200)
+                .with_body(file_list)
+                .create_async().await;
+            let _m2 = server
+                .mock("GET", "/config/assets_foo.json")
+                .with_status(200)
+                .with_body("{}")
+                .create_async().await;
+            let _m3 = server
+                .mock("GET", "/config/intel_bar.json")
+                .with_status(200)
+                .with_body("{}")
+                .create_async().await;
+            let _m4 = server
+                .mock("GET", "/config/vuln_baz.json")
+                .with_status(200)
+                .with_body("{}")
+                .create_async().await;
+        });
+
+        let config_files = list_config_files(url.clone()).await.unwrap();
+        assert!(config_files.len() == 3);
+        assert!(logs_contain("listing config files from"));
+        let res = download_files(
+            true,
+            Some(vec!["dl_config".to_owned()]),
+            url,
+            "qux".to_owned()
+        ).await;
+        assert!(res.is_ok());
+    }
 }

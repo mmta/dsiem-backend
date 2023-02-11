@@ -5,7 +5,7 @@
       "plugin": "Wise",
       "type": "IP",
       "enabled": true,
-      "config": "{ \"url\" : \"http://wise:8081/ip/${ip}\" }"
+      "config": "{ \"url\" : \"http://127.0.0.1:18081/ip/${ip}\" }"
     }
   ]
 }

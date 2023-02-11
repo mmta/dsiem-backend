@@ -12,7 +12,7 @@ mod wise;
 const INTEL_GLOB: &str = "intel_*.json";
 const INTEL_MAX_SECONDS: u64 = 10;
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct IntelSource {
     pub name: String,
     #[serde(rename(deserialize = "type"))]
@@ -22,7 +22,7 @@ pub struct IntelSource {
     pub config: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct IntelSources {
     pub intel_sources: Vec<IntelSource>,
 }
@@ -48,7 +48,7 @@ pub struct IntelPlugin {
 
 impl fmt::Debug for IntelPlugin {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "n/a")
+        write!(f, "{:?}", self.intel_sources)
     }
 }
 
@@ -123,4 +123,60 @@ pub fn load_intel(test_env: bool) -> Result<IntelPlugin> {
         cache,
     };
     Ok(res)
+}
+
+#[cfg(test)]
+mod test {
+    use tokio::join;
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_intel() {
+        let intels = load_intel(true).unwrap();
+        debug!("intels: {:?}", intels);
+        assert!(intels.intel_sources.len() == 1); // wise, change this if there's anything else
+        let mut set = HashSet::new();
+        let ip1: IpAddr = "192.168.0.1".parse().unwrap();
+        let ip2: IpAddr = "1.0.0.1".parse().unwrap();
+        let ip3: IpAddr = "1.0.0.2".parse().unwrap();
+        set.insert(ip1);
+        set.insert(ip2);
+        set.insert(ip3);
+        let res = intels.run_checkers(false, set.clone()).await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().to_string(), "get request error");
+
+        tokio::spawn(async {
+            let mut server = mockito::Server::new_with_port_async(18081).await;
+            let _m1 = server
+                .mock("GET", "/ip/1.0.0.1")
+                .with_status(200)
+                .with_body(
+                    r#"[{field: "description", len: 4, value: "blacklisted localnet -- testing only"}]"#
+                )
+                .create_async();
+            let _m2 = server
+                .mock("GET", "/ip/192.168.0.1")
+                .with_status(200)
+                .with_body(
+                    r#"[{field: "description", len: 37, value: "blacklisted localnet -- testing only"}]"#
+                )
+                .create_async();
+            let _m3 = server
+                .mock("GET", "/ip/1.0.0.2")
+                .with_status(200)
+                .with_body(
+                    r#"[{field: "description", len: 40, value: "blacklisted localnet -- testing only"}]"#
+                )
+                .create_async();
+            join!(_m1, _m2, _m3);
+        });
+
+        _ = intels.run_checkers(false, set.clone()).await;
+        // run again to use cache
+        let result_set = intels.run_checkers(true, set).await.unwrap();
+        // 1.0.0.1 has len < 5 and is filtered by wise plugin
+        assert!(result_set.len() == 2);
+    }
 }
