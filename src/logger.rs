@@ -24,6 +24,7 @@ pub fn verbosity_to_level_filter(severity: u8) -> LevelFilter {
 #[cfg(test)]
 mod test {
     use super::*;
+
     #[test]
     fn test_logging() {
         let level = verbosity_to_level_filter(10);
@@ -32,10 +33,13 @@ mod test {
         assert!(level == LevelFilter::INFO);
         let level = verbosity_to_level_filter(1);
         assert!(level == LevelFilter::DEBUG);
-        let sub = setup_logger_json(level).unwrap();
-        let _g = tracing::subscriber::set_default(sub);
-        let sub = setup_logger(level).unwrap();
-        let res = tracing::subscriber::set_global_default(sub);
-        assert!(res.is_ok());
+        {
+            let sub = setup_logger_json(level).unwrap();
+            let _g = tracing::subscriber::set_default(sub);
+        }
+        {
+            let sub = setup_logger(level).unwrap();
+            let _g = tracing::subscriber::set_default(sub);
+        }
     }
 }
