@@ -19,6 +19,7 @@ jobs:
         run: |
           cargo clippy
       - name: test
+        timeout-minutes: 5
         run: |
           cargo test
       - name: build-image
