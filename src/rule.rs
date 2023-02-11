@@ -525,7 +525,7 @@ fn match_text(subject: &str, term: &str) -> bool {
         return is_string_match_csvrule(subject, &term.to_string());
     }
 
-    return match_text_case_insensitive(subject, term);
+    match_text_case_insensitive(subject, term)
 }
 
 // WARNING: deprecated fn
