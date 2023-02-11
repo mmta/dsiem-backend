@@ -59,7 +59,7 @@ mod test {
     use tracing_test::traced_test;
 
     use super::*;
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     #[traced_test]
     async fn test_config() {
         let mut server = mockito::Server::new_async().await;
