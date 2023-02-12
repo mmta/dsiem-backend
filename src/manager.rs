@@ -80,10 +80,6 @@ impl Manager {
             let bp_sender = bp_sender.clone();
             let report_sender = self.option.report_tx.clone();
 
-            if directive.id != 10 {
-                continue;
-            }
-
             set.spawn(async move {
                 let (sid_pairs, taxo_pairs) = rule::get_quick_check_pairs(&directive.rules);
                 let contains_pluginrule = !sid_pairs.is_empty();
