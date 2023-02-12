@@ -76,8 +76,8 @@ impl VulnPlugin {
     }
 }
 
-pub fn load_vuln(test_env: bool) -> Result<VulnPlugin> {
-    let cfg_dir = utils::config_dir(test_env, None)?;
+pub fn load_vuln(test_env: bool, subdir: Option<Vec<String>>) -> Result<VulnPlugin> {
+    let cfg_dir = utils::config_dir(test_env, subdir)?;
     let glob_pattern = cfg_dir.to_string_lossy().to_string() + "/" + VULN_GLOB;
     let mut vulns = vec![];
     let mut checkers: Vec<Box<dyn VulnChecker>> = vec![];
@@ -125,7 +125,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_vuln() {
-        let vulns = load_vuln(true).unwrap();
+        let vulns = load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap();
         debug!("vulns: {:?}", vulns);
         assert!(vulns.vuln_sources.len() == 1); // wise, change this if there's anything else
         let mut set = HashSet::new();

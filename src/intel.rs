@@ -84,8 +84,8 @@ impl IntelPlugin {
     }
 }
 
-pub fn load_intel(test_env: bool) -> Result<IntelPlugin> {
-    let cfg_dir = utils::config_dir(test_env, None)?;
+pub fn load_intel(test_env: bool, subdir: Option<Vec<String>>) -> Result<IntelPlugin> {
+    let cfg_dir = utils::config_dir(test_env, subdir)?;
     let glob_pattern = cfg_dir.to_string_lossy().to_string() + "/" + INTEL_GLOB;
     let mut intels = vec![];
     let mut checkers: Vec<Box<dyn IntelChecker>> = vec![];
@@ -133,7 +133,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_intel() {
-        let intels = load_intel(true).unwrap();
+        let intels = load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap();
         debug!("intels: {:?}", intels);
         assert!(intels.intel_sources.len() == 1); // wise, change this if there's anything else
         let mut set = HashSet::new();

@@ -44,8 +44,8 @@ impl NetworkAssets {
         }
         Ok(result)
     }
-    pub fn new(test_env: bool) -> Result<NetworkAssets> {
-        let cfg_dir = utils::config_dir(test_env, None)?;
+    pub fn new(test_env: bool, subdir: Option<Vec<String>>) -> Result<NetworkAssets> {
+        let cfg_dir = utils::config_dir(test_env, subdir)?;
         let glob_pattern = cfg_dir.to_string_lossy().to_string() + "/" + ASSETS_GLOB;
         let mut result = NetworkAssets { assets: vec![], whitelist: vec![], home_net: vec![] };
         for file_path in glob(&glob_pattern)?.flatten() {
@@ -135,9 +135,10 @@ mod test {
     use super::*;
     #[test]
     fn test_assets() {
-        let res = NetworkAssets::new(false);
+        let subdir = Some(vec!["assets".to_string()]);
+        let res = NetworkAssets::new(false, None);
         assert_eq!(res.unwrap_err().to_string(), "cannot load any asset");
-        let assets = NetworkAssets::new(true).unwrap();
+        let assets = NetworkAssets::new(true, subdir).unwrap();
         let ip1: IpAddr = "192.168.0.1".parse().unwrap();
         let name = assets.get_name(&ip1).unwrap();
         assert_eq!(name, "Firewall".to_string());
