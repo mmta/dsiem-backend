@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use std::time::Duration;
 use clap::{ Parser, arg, command, Subcommand, Args };
-use tokio::{ task, time::timeout };
+use tokio::task::JoinSet;
 use tracing::{ info, error };
 use anyhow::{ Result, Error, anyhow };
-use tokio::sync::{ broadcast, mpsc, oneshot };
+use tokio::sync::{ broadcast, mpsc };
 use crate::{ manager::ManagerOpt, watchdog::WatchdogOpt, asset::NetworkAssets };
 
 mod asset;
@@ -55,6 +55,9 @@ struct Cli {
         default_value_t = false
     )]
     pub use_json: bool,
+    /// Testing environment flag
+    #[arg(long = "test-env", value_name = "boolean", default_value_t = false)]
+    pub test_env: bool,
 }
 
 #[derive(Subcommand)]
@@ -180,7 +183,7 @@ pub struct ServeArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    serve(true, true, false).await
+    serve(true, true).await
 }
 
 fn log_startup_err(context: &str, err: Error) -> Error {
@@ -188,8 +191,9 @@ fn log_startup_err(context: &str, err: Error) -> Error {
     err
 }
 
-async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()> {
+async fn serve(listen: bool, require_logging: bool) -> Result<()> {
     let args = Cli::parse();
+    let test_env = args.test_env;
     let verbosity = if args.debug { 1 } else if args.trace { 2 } else { args.verbosity };
     let level = logger::verbosity_to_level_filter(verbosity);
     let sub_json = logger::setup_logger_json(level)?;
@@ -237,7 +241,6 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
     let (bp_tx, bp_rx) = mpsc::channel::<()>(8);
     let (resptime_tx, resptime_rx) = mpsc::channel::<Duration>(128);
     let (cancel_tx, cancel_rx) = broadcast::channel::<()>(1);
-    let (ready_tx, ready_rx) = oneshot::channel::<()>();
     let event_tx_clone = event_tx.clone();
 
     let c = cancel_tx.clone();
@@ -250,51 +253,43 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         .map_err(|e| log_startup_err("downloading config", e))?;
 
     let assets = Arc::new(
-        NetworkAssets::new(test_env).map_err(|e| log_startup_err("loading assets", e))?
+        NetworkAssets::new(test_env, None).map_err(|e| log_startup_err("loading assets", e))?
     );
 
-    let worker_handle = task::spawn({
+    let mut set = JoinSet::new();
+
+    set.spawn({
         let assets = assets.clone();
         let event_tx = event_tx.clone();
         async move {
             let opt = worker::WorkerOpt {
                 event_tx,
                 bp_rx,
-                ready_tx,
                 cancel_rx,
                 assets,
                 nats_url: sargs.msq,
                 hold_duration: sargs.hold_duration,
             };
             let w = worker::Worker {};
-            w.start(opt).await.map_err(|e| {
-                error!("worker error: {:?}", e);
-                e
-            })
+            w.start(opt).await.map_err(|e| anyhow!("worker error: {:?}", e))
         }
     });
-    timeout(std::time::Duration::from_secs(10), ready_rx).await.map_err(|_|
-        log_startup_err(
-            "waiting for worker",
-            anyhow!("10 seconds timeout occurred, likely wrong msq URLs")
-        )
-    )??;
 
     let directives = directive
         ::load_directives(test_env, None)
         .map_err(|e| log_startup_err("loading directives", e))?;
 
     let intels = Arc::new(
-        intel::load_intel(test_env).map_err(|e| log_startup_err("loading intels", e))?
+        intel::load_intel(test_env, None).map_err(|e| log_startup_err("loading intels", e))?
     );
 
     let vulns = Arc::new(
-        vuln::load_vuln(test_env).map_err(|e| log_startup_err("loading vulns", e))?
+        vuln::load_vuln(test_env, None).map_err(|e| log_startup_err("loading vulns", e))?
     );
 
     let (report_tx, report_rx) = mpsc::channel::<manager::ManagerReport>(directives.len());
 
-    let watchdog_handle = task::spawn({
+    set.spawn({
         let cancel_tx = cancel_tx.clone();
         let opt = WatchdogOpt {
             event_tx,
@@ -307,10 +302,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         };
         async move {
             let w = watchdog::Watchdog::default();
-            w.start(opt).await.map_err(|e| {
-                error!("{:?}", e);
-                e
-            })
+            w.start(opt).await.map_err(|e| anyhow!("watchdog error: {:?}", e))
         }
     });
 
@@ -324,7 +316,7 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         min_alarm_lifetime,
         backpressure_tx: bp_tx,
         resptime_tx,
-        cancel_tx,
+        cancel_tx: cancel_tx.clone(),
         publisher: event_tx_clone,
         med_risk_max: sargs.med_risk_max,
         med_risk_min: sargs.med_risk_min,
@@ -334,20 +326,19 @@ async fn serve(listen: bool, require_logging: bool, test_env: bool) -> Result<()
         report_tx,
     };
     let manager = manager::Manager::new(opt).map_err(|e| log_startup_err("loading manager", e))?;
-    let manager_handle = task::spawn(async { manager
+    set.spawn(async {
+        manager
             .listen(REPORT_INTERVAL_IN_SECONDS).await
-            .map_err(|e| {
-                error!("{:?}", e);
-                e
-            }) });
+            .map_err(|e| anyhow!("manager error: {:?}", e))
+    });
 
-    let (worker_res, manager_res, watchdog_res) = tokio::join!(
-        worker_handle,
-        manager_handle,
-        watchdog_handle
-    );
-    worker_res??;
-    manager_res??;
-    watchdog_res??;
+    while let Some(res) = set.join_next().await {
+        let inner_res = res.unwrap();
+        if let Err(e) = inner_res {
+            error!("{:?}", e);
+            _ = cancel_tx.send(());
+            return Err(e);
+        }
+    }
     Ok(())
 }
