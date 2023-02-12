@@ -15,9 +15,11 @@ fn get_dir(test_env: bool) -> Result<PathBuf, std::io::Error> {
 pub fn config_dir(test_env: bool, subdir: Option<Vec<String>>) -> Result<PathBuf, std::io::Error> {
     let mut dir = get_dir(test_env)?;
     dir.push("configs");
-    if let Some(v) = subdir {
-        for d in v {
-            dir.push(d);
+    if test_env {
+        if let Some(v) = subdir {
+            for d in v {
+                dir.push(d);
+            }
         }
     }
     Ok(dir)
