@@ -2,7 +2,7 @@
 
 use std::{ sync::Arc, time::Duration };
 use futures_lite::StreamExt;
-use tokio::{ sync::{ broadcast::{ Sender, self }, oneshot, mpsc }, time::interval };
+use tokio::{ sync::{ broadcast::{ Sender, self }, mpsc }, time::{ interval, timeout } };
 use std::str;
 
 use crate::{ event::{ self, NormalizedEvent }, asset::NetworkAssets };
@@ -32,17 +32,20 @@ pub struct WorkerOpt {
     pub nats_url: String,
     pub event_tx: broadcast::Sender<NormalizedEvent>,
     pub bp_rx: mpsc::Receiver<()>,
-    pub ready_tx: oneshot::Sender<()>,
     pub cancel_rx: broadcast::Receiver<()>,
     pub hold_duration: u8,
     pub assets: Arc<NetworkAssets>,
 }
 
+const NATS_CONNECT_MAX_SECONDS: u64 = 5;
 pub struct Worker {}
 
 impl Worker {
     pub async fn start(&self, mut opt: WorkerOpt) -> Result<()> {
-        let client = nats_client(&opt.nats_url).await?;
+        let client = timeout(
+            std::time::Duration::from_secs(NATS_CONNECT_MAX_SECONDS),
+            nats_client(&opt.nats_url)
+        ).await?.context(format!("cannot connect to {}", opt.nats_url))?;
 
         let mut subscription = client
             .subscribe(EVENT_SUBJECT.into()).await
@@ -53,8 +56,6 @@ impl Worker {
         let mut bp_state = false;
 
         info!("listening for new events");
-        opt.ready_tx.send(()).map_err(|_| anyhow!("cannot send ready signal"))?;
-
         loop {
             tokio::select! {
                 Some(message) = subscription.next() => {
@@ -129,5 +130,95 @@ impl Worker {
         }
         debug!("event {} broadcasted", e.id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use tokio::{ time::sleep, task };
+    use tracing_test::traced_test;
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_worker() {
+        let mut pty = rexpect
+            ::spawn("docker run -p 42222:42222 --rm -it nats -p 42222", None)
+            .unwrap();
+        pty.exp_string("Server is ready").unwrap();
+
+        let assets = Arc::new(NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap());
+        let (event_tx, _) = broadcast::channel::<NormalizedEvent>(5);
+        let (cancel_tx, cancel_rx) = broadcast::channel::<()>(5);
+        let (bp_tx, bp_rx) = mpsc::channel::<()>(5);
+        let opt = WorkerOpt {
+            nats_url: "nats://127.0.0.1:42222".to_string(),
+            assets,
+            event_tx,
+            cancel_rx,
+            bp_rx,
+            hold_duration: 1,
+        };
+
+        let _detached = task::spawn(async {
+            let w = Worker {};
+            _ = w.start(opt).await;
+        });
+
+        sleep(Duration::from_millis(3000)).await;
+        assert!(logs_contain("listening for new events"));
+
+        _ = bp_tx.send(()).await;
+        _ = bp_tx.send(()).await;
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("received under pressure signal from backlogs"));
+        assert!(logs_contain("overload = true signal sent to frontend"));
+        assert!(logs_contain("last under pressure signal is still active"));
+
+        _ = cancel_tx.send(());
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("cancel signal received"));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_handle_event_message() {
+        let assets = Arc::new(NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap());
+        let (event_tx, mut event_rx) = broadcast::channel::<NormalizedEvent>(1);
+        let w = Worker {};
+
+        let res = w.handle_event_message(&assets, &event_tx, "foo");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("cannot parse event"));
+
+        let mut event = NormalizedEvent::default();
+        let payload_str = serde_json::to_string(&event).unwrap();
+
+        let res = w.handle_event_message(&assets, &event_tx, &payload_str);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("is not valid"));
+
+        event.plugin_id = 1001;
+        event.plugin_sid = 50001;
+        event.src_ip = "192.168.0.2".parse().unwrap();
+        let payload_str = serde_json::to_string(&event).unwrap();
+        let res = w.handle_event_message(&assets, &event_tx, &payload_str);
+        assert!(res.is_ok());
+        assert!(logs_contain("whitelisted"));
+
+        let h = task::spawn(async move { event_rx.recv().await });
+
+        event.src_ip = "192.168.0.1".parse().unwrap();
+        let payload_str = serde_json::to_string(&event).unwrap();
+        let res = w.handle_event_message(&assets, &event_tx, &payload_str);
+        assert!(res.is_ok());
+        assert!(logs_contain("broadcasted"));
+
+        h.abort();
+        _ = h.await;
+
+        let res = w.handle_event_message(&assets, &event_tx, &payload_str);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("cannot send event"));
     }
 }

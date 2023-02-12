@@ -1,11 +1,12 @@
 use std::{ net::IpAddr, str::FromStr };
 
 use chrono::prelude::*;
+use serde::Serialize;
 use serde_derive::Deserialize;
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct NormalizedEvent {
-    #[serde(rename(deserialize = "event_id"))]
+    #[serde(rename(deserialize = "event_id", serialize = "event_id"))]
     pub id: String,
     pub timestamp: DateTime<Utc>,
     pub src_ip: IpAddr,
@@ -102,7 +103,8 @@ mod test {
         e.category = "Firewall".to_owned();
         assert!(e.valid());
 
-        let s = r#"{"event_id":"bar", "timestamp": "2023-01-01T00:00:00Z","src_ip":"10.0.0.3", "dst_ip":"0.0.0.0", "src_port": 80, "dst_port": 0, "sensor": "foo", "protocol":"TCP" }"#;
+        let s =
+            r#"{"event_id":"bar", "timestamp": "2023-01-01T00:00:00Z","src_ip":"10.0.0.3", "dst_ip":"0.0.0.0", "src_port": 80, "dst_port": 0, "sensor": "foo", "protocol":"TCP" }"#;
         let e3: NormalizedEvent = serde_json::from_str(s).unwrap();
         assert!(!e3.valid());
     }
