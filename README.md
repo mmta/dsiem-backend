@@ -33,5 +33,5 @@ Compared to Dsiem in the main repo, this binary currently:
 - Overall simpler structure and easier to understand, partly because of the reduced features.
 - Doesn't default to use JSON-lines log output (enable through `-j` parameter or `DSIEM_JSON=true` env. variable).
 - Has no support for Elastic APM.
-- Has less test coverage, and has not been thoroughly tested in production environment (this may improve).
+- Has not been thoroughly tested in production environment (this may improve).
 
