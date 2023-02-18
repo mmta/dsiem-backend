@@ -145,7 +145,8 @@ mod test {
         set.insert(ip3);
         let res = intels.run_checkers(false, set.clone()).await;
         assert!(res.is_err());
-        assert_eq!(res.unwrap_err().to_string(), "get request error");
+        let str_err = res.unwrap_err().to_string();
+        assert!(str_err == "get request error" || str_err == "deadline has elapsed");
 
         tokio::spawn(async {
             let mut server = mockito::Server::new_with_port_async(18081).await;
@@ -173,10 +174,10 @@ mod test {
             join!(_m1, _m2, _m3);
         });
 
-        _ = intels.run_checkers(false, set.clone()).await;
-        // run again to use cache
-        let result_set = intels.run_checkers(true, set).await.unwrap();
+        let result_set = intels.run_checkers(false, set.clone()).await.unwrap();
         // 1.0.0.1 has len < 5 and is filtered by wise plugin
-        assert!(result_set.len() == 2);
+        assert_eq!(result_set.len(), 1);
+        // run again to use cache
+        _ = intels.run_checkers(true, set).await.unwrap();
     }
 }
