@@ -931,6 +931,7 @@ mod test {
             intel_private_ip: true,
         };
         let backlog = Backlog::new(opt).await.unwrap();
+        debug!("backlog: {:?}", backlog);
         let _detached = task::spawn(async move {
             _ = backlog.start(event_rx, &evt_cloned, resptime_tx, 1).await;
         });
@@ -963,6 +964,102 @@ mod test {
         event_tx.send(evt.clone()).unwrap();
         sleep(Duration::from_millis(1000)).await;
         assert!(logs_contain("reached max stage and occurrence"));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_all_rules_always_active_n_stickydiff() {
+        let directives = directive
+            ::load_directives(true, Some(vec!["directives".to_string(), "directive6".to_string()]))
+            .unwrap();
+        let d = directives[0].clone();
+        let asset = Arc::new(NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap());
+        let intels = Arc::new(
+            crate::intel::load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+        );
+        let vulns = Arc::new(
+            crate::vuln::load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+        );
+        let (mgr_delete_tx, _) = mpsc::channel::<()>(128);
+        let (event_tx, event_rx) = broadcast::channel(10);
+        let (bp_tx, _) = mpsc::channel::<()>(1);
+        let (resptime_tx, _resptime_rx) = mpsc::channel::<Duration>(128);
+
+        let mut evt = NormalizedEvent {
+            plugin_id: 1337,
+            plugin_sid: 1,
+            id: "1".to_string(),
+            src_ip: "192.168.0.1".parse().unwrap(),
+            dst_ip: "10.0.0.131".parse().unwrap(),
+            src_port: 31337,
+            dst_port: 80,
+            ..Default::default()
+        };
+
+        let evt_cloned = evt.clone();
+        let opt = BacklogOpt {
+            directive: &d,
+            asset,
+            intels,
+            vulns,
+            event: &evt_cloned,
+            bp_tx,
+            delete_tx: mgr_delete_tx,
+            default_status: "Open".to_string(),
+            default_tag: "Identified Threat".to_string(),
+            min_alarm_lifetime: 0,
+            med_risk_min: 3,
+            med_risk_max: 5,
+            intel_private_ip: true,
+        };
+        let backlog = Backlog::new(opt).await.unwrap();
+        let _detached = task::spawn(async move {
+            _ = backlog.start(event_rx, &evt_cloned, resptime_tx, 1).await;
+        });
+
+        evt.id = "2".to_string();
+        evt.src_port = 31313;
+        event_tx.send(evt.clone()).unwrap();
+        evt.id = "3".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("previous rule consume event"));
+
+        // these shouldn't match
+        evt.id = "4".to_string();
+        evt.plugin_sid = 3;
+        event_tx.send(evt.clone()).unwrap();
+        evt.id = "5".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("event doesn't match"));
+
+        // these matching event should be captured by first rule, but only when there's uniq SRC_PORT (sticky_different)
+        // this should increase risk to 1 (Low)
+        evt.plugin_sid = 2;
+        evt.src_port = 31337;
+        evt.id = "6".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(1000)).await;
+
+        evt.id = "7".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("backlog can't find new unique value in stickydiff field"));
+
+        evt.src_port = 31313;
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("risk changed from 0 to 1"));
+
+        // this should increase risk to 6 (High, because med_risk_max = 5 )
+        evt.plugin_sid = 3;
+        evt.id = "8".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        evt.id = "9".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("risk changed from 1 to 6"));
     }
 
     #[tokio::test]
