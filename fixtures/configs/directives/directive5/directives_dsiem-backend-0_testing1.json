@@ -30,7 +30,7 @@
         },
         {
           "stage": 2,
-          "occurrence": 2,
+          "occurrence": 1,
           "reliability": 1,
           "port_from": "ANY",
           "port_to": "ANY",
@@ -48,12 +48,13 @@
           "custom_label3": "ANY",
           "custom_data3": "ANY",
           "plugin_sid": [
-            1
+            1,
+            2
           ]
         },
         {
           "stage": 3,
-          "occurrence": 3,
+          "occurrence": 1,
           "reliability": 10,
           "port_from": "ANY",
           "port_to": "ANY",
@@ -76,7 +77,7 @@
         },
         {
           "stage": 4,
-          "occurrence": 100,
+          "occurrence": 2,
           "reliability": 10,
           "port_from": "ANY",
           "port_to": "ANY",
