@@ -15,7 +15,7 @@ use crate::{
 
 const DIRECTIVES_GLOB: &str = "directives_*.json";
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Directive {
     pub id: u64,
     pub name: String,
