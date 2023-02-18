@@ -228,3 +228,130 @@ impl Manager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use crate::{ directive, manager };
+
+    use super::*;
+    use tokio::{ time::sleep, task };
+    use tracing_test::traced_test;
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_manager() {
+        let directives = directive
+            ::load_directives(true, Some(vec!["directives".to_string(), "directive5".to_string()]))
+            .unwrap();
+        let assets = Arc::new(NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap());
+        let intels = Arc::new(
+            crate::intel::load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+        );
+        let vulns = Arc::new(
+            crate::vuln::load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+        );
+        let (event_tx, _) = broadcast::channel(10);
+        let (backpressure_tx, _) = mpsc::channel::<()>(8);
+        let (resptime_tx, _) = mpsc::channel::<Duration>(128);
+        let (cancel_tx, _) = broadcast::channel::<()>(1);
+        let (report_tx, mut report_rx) = mpsc::channel::<manager::ManagerReport>(directives.len());
+        let opt = ManagerOpt {
+            test_env: true,
+            directives,
+            assets,
+            intels,
+            vulns,
+            intel_private_ip: false,
+            max_delay: 0,
+            min_alarm_lifetime: 0,
+            backpressure_tx,
+            cancel_tx: cancel_tx.clone(),
+            resptime_tx,
+            publisher: event_tx.clone(),
+            default_status: "Open".to_string(),
+            default_tag: "Identified Threat".to_string(),
+            med_risk_min: 3,
+            med_risk_max: 6,
+            report_tx,
+        };
+
+        let _detached = task::spawn(async {
+            let m = Manager::new(opt).unwrap();
+            _ = m.listen(1).await;
+        });
+
+        let _report_receiver = task::spawn(async move {
+            let res = report_rx.recv().await;
+            if res.is_some() {
+                debug!("report received");
+            }
+        });
+
+        // test comparing report
+        let rpt1 = ManagerReport {
+            id: 1,
+            active_backlogs: 1,
+        };
+        let mut rpt2 = ManagerReport {
+            id: 1,
+            active_backlogs: 1,
+        };
+        assert!(rpt1 == rpt2);
+        rpt2.active_backlogs = 2;
+        assert!(rpt1 != rpt2);
+
+        let mut evt = NormalizedEvent {
+            plugin_id: 31337,
+            plugin_sid: 2,
+            custom_label1: "label".to_string(),
+            custom_data1: "data".to_string(),
+            ..Default::default()
+        };
+
+        sleep(Duration::from_millis(1000)).await;
+
+        // unmatched event
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(500)).await;
+        assert!(logs_contain("failed quick check"));
+
+        // matched event but not on the first rule
+        evt.plugin_id = 1337;
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(500)).await;
+        assert!(logs_contain("event doesn't match first rule"));
+
+        // matched event 1
+        evt.plugin_sid = 1;
+        evt.id = "1".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(500)).await;
+        assert!(logs_contain("creating new backlog"));
+
+        // matched event 2
+        evt.id = "2".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(500)).await;
+        assert!(logs_contain("event sent downstream"));
+        assert!(logs_contain("found existing backlog that consumes the event"));
+
+        // matched event 3 to 5
+        evt.id = "3".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        evt.id = "4".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        evt.id = "5".to_string();
+        event_tx.send(evt).unwrap();
+        sleep(Duration::from_millis(3000)).await;
+        assert!(logs_contain("cleaning deleted backlog"));
+
+        // report tick
+        sleep(Duration::from_millis(500)).await;
+        assert!(logs_contain("report received"));
+
+        // cancel signal
+        _ = cancel_tx.send(());
+        sleep(Duration::from_millis(500)).await;
+        assert!(logs_contain("backlog manager exiting"));
+    }
+}
