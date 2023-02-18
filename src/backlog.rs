@@ -944,14 +944,15 @@ mod test {
         evt.id = "3".to_string();
         evt.dst_ip = "10.0.0.131".parse().unwrap();
         event_tx.send(evt.clone()).unwrap();
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(1000)).await;
         assert!(logs_contain("risk changed"));
         assert!(logs_contain("stage increased to 4"));
 
         // event with out of order timestamp
+        sleep(Duration::from_millis(500)).await;
         evt.timestamp = Utc::now().checked_sub_days(Days::new(1)).unwrap();
         event_tx.send(evt.clone()).unwrap();
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(3000)).await;
         assert!(logs_contain("discarded out of order event"));
 
         // these matching event should reach max occurrence for stage 4

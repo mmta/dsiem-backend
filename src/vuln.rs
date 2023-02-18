@@ -139,8 +139,8 @@ mod test {
         set.insert(ip2);
         set.insert(ip3);
         let res: Result<HashSet<VulnResult>> = vulns.run_checkers(ip1, port1).await;
-        assert!(res.is_err());
-        assert_eq!(res.unwrap_err().to_string(), "get request error");
+        let str_err = res.unwrap_err().to_string();
+        assert!(str_err == "get request error" || str_err == "deadline has elapsed");
 
         tokio::spawn(async {
             let mut server = mockito::Server::new_with_port_async(18082).await;

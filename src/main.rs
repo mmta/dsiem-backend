@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use std::time::Duration;
 use clap::{ Parser, arg, command, Subcommand, Args };
-use tokio::task::JoinSet;
+use tokio::{ task::JoinSet, time::sleep };
 use tracing::{ info, error };
 use anyhow::{ Result, Error, anyhow };
 use tokio::sync::{ broadcast, mpsc };
@@ -100,7 +100,7 @@ pub struct ServeArgs {
         value_name = "comma separated strings",
         use_value_delimiter = true,
         value_delimiter = ',',
-        default_value = "Open, In-Progress, Closed"
+        default_value = "Open,In-Progress,Closed"
     )]
     status: Vec<String>,
     /// Alarm tags to use, the first one will be assigned to new alarms
@@ -111,7 +111,7 @@ pub struct ServeArgs {
         value_name = "comma separated strings",
         use_value_delimiter = true,
         value_delimiter = ',',
-        default_value = "Identified Threat, False Positive, Valid Threat, Security Incident"
+        default_value = "Identified Threat,False Positive,Valid Threat,Security Incident"
     )]
     tags: Vec<String>,
     /// Minimum alarm risk value to be classified as Medium risk. Lower value than this will be classified as Low risk
@@ -183,7 +183,7 @@ pub struct ServeArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    serve(true, true).await
+    serve(true, true, Cli::parse()).await
 }
 
 fn log_startup_err(context: &str, err: Error) -> Error {
@@ -191,8 +191,7 @@ fn log_startup_err(context: &str, err: Error) -> Error {
     err
 }
 
-async fn serve(listen: bool, require_logging: bool) -> Result<()> {
-    let args = Cli::parse();
+async fn serve(listen: bool, require_logging: bool, args: Cli) -> Result<()> {
     let test_env = args.test_env;
     let verbosity = if args.debug { 1 } else if args.trace { 2 } else { args.verbosity };
     let level = logger::verbosity_to_level_filter(verbosity);
@@ -205,10 +204,6 @@ async fn serve(listen: bool, require_logging: bool) -> Result<()> {
     };
     if require_logging {
         log_result?;
-    }
-
-    if !listen {
-        return Ok(());
     }
 
     let SubCommands::ServeCommand(sargs) = args.subcommand;
@@ -249,11 +244,18 @@ async fn serve(listen: bool, require_logging: bool) -> Result<()> {
     })?;
 
     config
-        ::download_files(test_env, None, sargs.frontend, sargs.node).await
+        ::download_files(
+            test_env,
+            Some(vec!["dl_config".to_string()]),
+            sargs.frontend,
+            sargs.node
+        ).await
         .map_err(|e| log_startup_err("downloading config", e))?;
 
     let assets = Arc::new(
-        NetworkAssets::new(test_env, None).map_err(|e| log_startup_err("loading assets", e))?
+        NetworkAssets::new(test_env, Some(vec!["assets".to_string()])).map_err(|e|
+            log_startup_err("loading assets", e)
+        )?
     );
 
     let mut set = JoinSet::new();
@@ -276,15 +278,19 @@ async fn serve(listen: bool, require_logging: bool) -> Result<()> {
     });
 
     let directives = directive
-        ::load_directives(test_env, None)
+        ::load_directives(test_env, Some(vec!["directives".to_string(), "directive5".to_string()]))
         .map_err(|e| log_startup_err("loading directives", e))?;
 
     let intels = Arc::new(
-        intel::load_intel(test_env, None).map_err(|e| log_startup_err("loading intels", e))?
+        intel
+            ::load_intel(test_env, Some(vec!["intel_vuln".to_string()]))
+            .map_err(|e| log_startup_err("loading intels", e))?
     );
 
     let vulns = Arc::new(
-        vuln::load_vuln(test_env, None).map_err(|e| log_startup_err("loading vulns", e))?
+        vuln
+            ::load_vuln(test_env, Some(vec!["intel_vuln".to_string()]))
+            .map_err(|e| log_startup_err("loading vulns", e))?
     );
 
     let (report_tx, report_rx) = mpsc::channel::<manager::ManagerReport>(directives.len());
@@ -332,13 +338,107 @@ async fn serve(listen: bool, require_logging: bool) -> Result<()> {
             .map_err(|e| anyhow!("manager error: {:?}", e))
     });
 
-    while let Some(res) = set.join_next().await {
-        let inner_res = res.unwrap();
-        if let Err(e) = inner_res {
-            error!("{:?}", e);
-            _ = cancel_tx.send(());
-            return Err(e);
+    if listen {
+        while let Some(res) = set.join_next().await {
+            let inner_res = res.unwrap();
+            if let Err(e) = inner_res {
+                error!("{:?}", e);
+                _ = cancel_tx.send(());
+                return Err(e);
+            }
         }
+    } else {
+        sleep(Duration::from_secs(1)).await; // gives time for all spawns to await
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use tracing::debug;
+    use tracing_test::traced_test;
+
+    #[test]
+    fn test_default_cli_param() {
+        let args = Cli::parse_from([
+            "dsiem-backend",
+            "--test-env",
+            "serve",
+            "-n",
+            "dsiem-backend-0",
+        ]);
+        assert!(args.test_env);
+        assert!(!args.debug);
+        assert!(!args.trace);
+        assert!(!args.use_json);
+        assert_eq!(args.verbosity, 0);
+        let SubCommands::ServeCommand(sargs) = args.subcommand;
+        assert_eq!(sargs.frontend, "http://frontend:8080");
+        assert_eq!(sargs.hold_duration, 10);
+        assert_eq!(sargs.cache_duration, 10);
+        assert_eq!(sargs.max_delay, 180);
+        assert_eq!(sargs.max_queue, 25000);
+        assert_eq!(sargs.max_eps, 1000);
+        assert_eq!(sargs.med_risk_max, 6);
+        assert_eq!(sargs.med_risk_min, 3);
+        assert_eq!(sargs.min_alarm_lifetime, 0);
+        assert_eq!(sargs.msq, "nats://dsiem-nats:4222");
+        assert_eq!(sargs.node, "dsiem-backend-0");
+        assert!(!sargs.intel_private_ip);
+        assert!(sargs.tags.iter().any(|x| x == "Valid Threat"));
+        assert!(sargs.status.iter().any(|x| x == "Open"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    #[traced_test]
+    async fn test_serve() {
+        let cli = Cli::parse_from([
+            "dsiem-backend",
+            "--test-env",
+            "--json",
+            "serve",
+            "-n",
+            "dsiem-backend-0",
+            "--med_risk_max",
+            "11",
+        ]);
+        let res = serve(false, false, cli).await;
+        assert!(logs_contain("error reading med_risk_min and med_risk_max"));
+        assert!(res.is_err());
+
+        let file_list = r#"{ 
+                "files" : [] 
+            }"#;
+
+        let mut server = mockito::Server::new_with_port_async(19001).await;
+        let url = server.url();
+        debug!("using url: {}", url.clone());
+        tokio::spawn(async move {
+            server
+                .mock("GET", "/config/")
+                .with_status(200)
+                .with_body(file_list)
+                .create_async().await;
+        });
+
+        let mut pty = rexpect
+            ::spawn("docker run --name nats-main -p 42223:42223 --rm -it nats -p 42223", Some(5000))
+            .unwrap();
+        pty.exp_string("Server is ready").unwrap();
+
+        let cli = Cli::parse_from([
+            "dsiem-backend",
+            "--test-env",
+            "serve",
+            "-n",
+            "dsiem-backend-0",
+            "-f",
+            "http://127.0.0.1:19001",
+            "--msq",
+            "nats://127.0.0.1:42223",
+        ]);
+        let res = serve(false, false, cli).await;
+        assert!(res.is_ok())
+    }
 }

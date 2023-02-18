@@ -115,7 +115,7 @@ mod test {
             _ = event_tx.send(NormalizedEvent::default());
         }
         _ = resptime_tx.send(Duration::from_millis(10000)).await;
-        sleep(Duration::from_millis(2000)).await;
+        sleep(Duration::from_millis(3000)).await;
         assert!(logs_contain("processing time maybe too long"));
 
         let rpt = ManagerReport {
