@@ -851,3 +851,168 @@ impl VulnSearchTerm {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use crate::directive;
+
+    use super::*;
+    use chrono::Days;
+    use tokio::{ time::sleep, task, sync::{ mpsc, broadcast } };
+    use tracing_test::traced_test;
+
+    #[test]
+    fn test_vuln_searchterm() {
+        let mut vs = VulnSearchTerm::default();
+        let mut ipset = HashSet::new();
+        ipset.insert("192.168.0.1");
+        let mut ports = HashSet::new();
+        ports.insert("80");
+        let evt_port = 443;
+        vs.add(ipset.clone(), ports.clone(), evt_port);
+        assert!(vs.terms.len() == 2);
+        vs.add(ipset, ports, evt_port);
+        assert!(vs.terms.len() == 2);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_backlog() {
+        let directives = directive
+            ::load_directives(true, Some(vec!["directives".to_string(), "directive5".to_string()]))
+            .unwrap();
+        let d = directives[0].clone();
+        let asset = Arc::new(NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap());
+        let intels = Arc::new(
+            crate::intel::load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+        );
+        let vulns = Arc::new(
+            crate::vuln::load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+        );
+        let (mgr_delete_tx, _) = mpsc::channel::<()>(128);
+        let (event_tx, event_rx) = broadcast::channel(10);
+        let (bp_tx, _) = mpsc::channel::<()>(1);
+        let (resptime_tx, _resptime_rx) = mpsc::channel::<Duration>(128);
+
+        let now = Utc::now().timestamp_nanos();
+
+        let mut evt = NormalizedEvent {
+            plugin_id: 1337,
+            plugin_sid: 1,
+            id: "1".to_string(),
+            src_ip: "192.168.0.1".parse().unwrap(),
+            dst_ip: "10.0.0.131".parse().unwrap(),
+            src_port: 31337,
+            dst_port: 80,
+            custom_label1: "label".to_string(),
+            custom_data1: "data".to_string(),
+            custom_label2: "label".to_string(),
+            custom_data2: "data".to_string(),
+            custom_label3: "label".to_string(),
+            custom_data3: "data".to_string(),
+            rcvd_time: now - 10000,
+            ..Default::default()
+        };
+
+        let evt_cloned = evt.clone();
+        let opt = BacklogOpt {
+            directive: &d,
+            asset,
+            intels,
+            vulns,
+            event: &evt_cloned,
+            bp_tx,
+            delete_tx: mgr_delete_tx,
+            default_status: "Open".to_string(),
+            default_tag: "Identified Threat".to_string(),
+            min_alarm_lifetime: 0,
+            med_risk_min: 3,
+            med_risk_max: 6,
+            intel_private_ip: true,
+        };
+        let backlog = Backlog::new(opt).await.unwrap();
+        let _detached = task::spawn(async move {
+            _ = backlog.start(event_rx, &evt_cloned, resptime_tx, 1).await;
+        });
+
+        // these matching event should increase level from 2 to 3 to 4, and raise risk
+        evt.id = "2".to_string();
+        evt.src_ip = "0.0.0.0".parse().unwrap();
+        evt.dst_ip = "0.0.0.0".parse().unwrap();
+        event_tx.send(evt.clone()).unwrap();
+
+        evt.id = "3".to_string();
+        evt.dst_ip = "10.0.0.131".parse().unwrap();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(500)).await;
+        assert!(logs_contain("risk changed"));
+        assert!(logs_contain("stage increased to 4"));
+
+        // event with out of order timestamp
+        evt.timestamp = Utc::now().checked_sub_days(Days::new(1)).unwrap();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(500)).await;
+        assert!(logs_contain("discarded out of order event"));
+
+        // these matching event should reach max occurrence for stage 4
+        evt.timestamp = Utc::now();
+        evt.id = "4".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        evt.id = "5".to_string();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("reached max stage and occurrence"));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_expired() {
+        let directives = directive
+            ::load_directives(true, Some(vec!["directives".to_string(), "directive5".to_string()]))
+            .unwrap();
+        let d = directives[0].clone();
+        let asset = Arc::new(NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap());
+        let intels = Arc::new(
+            crate::intel::load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+        );
+        let vulns = Arc::new(
+            crate::vuln::load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+        );
+        let (mgr_delete_tx, _) = mpsc::channel::<()>(128);
+        let (_, event_rx) = broadcast::channel(10);
+        let (bp_tx, _bp_rx) = mpsc::channel::<()>(8);
+        let (resptime_tx, _resptime_rx) = mpsc::channel::<Duration>(128);
+
+        let evt = NormalizedEvent {
+            plugin_id: 1337,
+            plugin_sid: 1,
+            custom_label1: "label".to_string(),
+            custom_data1: "data".to_string(),
+            ..Default::default()
+        };
+
+        let _detached = task::spawn(async move {
+            let opt = BacklogOpt {
+                directive: &d,
+                asset,
+                intels,
+                vulns,
+                event: &evt,
+                bp_tx,
+                delete_tx: mgr_delete_tx,
+                default_status: "Open".to_string(),
+                default_tag: "Identified Threat".to_string(),
+                min_alarm_lifetime: 0,
+                med_risk_min: 3,
+                med_risk_max: 6,
+                intel_private_ip: false,
+            };
+            let backlog = Backlog::new(opt).await.unwrap();
+            _ = backlog.start(event_rx, &evt, resptime_tx, 0).await;
+        });
+
+        // expired
+        sleep(Duration::from_millis(13000)).await;
+        assert!(logs_contain("backlog expired"));
+    }
+}
