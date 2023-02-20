@@ -27,7 +27,7 @@ pub struct IntelSources {
     pub intel_sources: Vec<IntelSource>,
 }
 
-#[derive(Hash, Eq, PartialEq, Default, Serialize, Debug, Clone)]
+#[derive(Hash, Eq, PartialEq, Default, Serialize, Deserialize, Debug, Clone)]
 pub struct IntelResult {
     pub provider: String,
     pub term: String,

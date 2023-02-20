@@ -27,7 +27,7 @@ pub struct VulnSources {
     pub vuln_sources: Vec<VulnSource>,
 }
 
-#[derive(Hash, Eq, PartialEq, Default, Serialize, Debug, Clone)]
+#[derive(Hash, Eq, PartialEq, Default, Serialize, Deserialize, Debug, Clone)]
 pub struct VulnResult {
     pub provider: String,
     pub term: String,
