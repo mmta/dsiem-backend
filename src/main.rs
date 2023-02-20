@@ -397,6 +397,7 @@ mod test {
         assert!(!sargs.intel_private_ip);
         assert!(sargs.tags.iter().any(|x| x == "Valid Threat"));
         assert!(sargs.status.iter().any(|x| x == "Open"));
+        assert!(sargs.reload_backlogs);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]

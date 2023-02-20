@@ -340,7 +340,7 @@ mod test {
     use crate::{ directive, manager };
 
     use super::*;
-    use tokio::{ time::sleep, task };
+    use tokio::{ time::sleep, task, sync::broadcast::Sender };
     use tracing_test::traced_test;
 
     #[tokio::test]
@@ -349,39 +349,54 @@ mod test {
         let directives = directive
             ::load_directives(true, Some(vec!["directives".to_string(), "directive5".to_string()]))
             .unwrap();
-        let assets = Arc::new(NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap());
-        let intels = Arc::new(
-            crate::intel::load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap()
-        );
-        let vulns = Arc::new(
-            crate::vuln::load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap()
-        );
         let (event_tx, _) = broadcast::channel(10);
-        let (backpressure_tx, _) = mpsc::channel::<()>(8);
-        let (resptime_tx, _) = mpsc::channel::<Duration>(128);
         let (cancel_tx, _) = broadcast::channel::<()>(1);
         let (report_tx, mut report_rx) = mpsc::channel::<manager::ManagerReport>(directives.len());
-        let opt = ManagerOpt {
-            test_env: true,
-            reload_backlogs: true,
-            directives,
-            assets,
-            intels,
-            vulns,
-            intel_private_ip: false,
-            max_delay: 0,
-            min_alarm_lifetime: 0,
-            backpressure_tx,
-            cancel_tx: cancel_tx.clone(),
-            resptime_tx,
-            publisher: event_tx.clone(),
-            default_status: "Open".to_string(),
-            default_tag: "Identified Threat".to_string(),
-            med_risk_min: 3,
-            med_risk_max: 6,
-            report_tx,
-        };
 
+        let get_opt = move |
+            c: Sender<()>,
+            e: Sender<NormalizedEvent>,
+            r: mpsc::Sender<ManagerReport>
+        | {
+            let (backpressure_tx, _) = mpsc::channel::<()>(8);
+            let (resptime_tx, _) = mpsc::channel::<Duration>(128);
+            let directives = directive
+                ::load_directives(
+                    true,
+                    Some(vec!["directives".to_string(), "directive5".to_string()])
+                )
+                .unwrap();
+            let assets = Arc::new(
+                NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap()
+            );
+            let intels = Arc::new(
+                crate::intel::load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+            );
+            let vulns = Arc::new(
+                crate::vuln::load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+            );
+            ManagerOpt {
+                test_env: true,
+                reload_backlogs: true,
+                directives,
+                assets,
+                intels,
+                vulns,
+                intel_private_ip: false,
+                max_delay: 0,
+                min_alarm_lifetime: 0,
+                backpressure_tx,
+                cancel_tx: c,
+                resptime_tx,
+                publisher: e,
+                default_status: "Open".to_string(),
+                default_tag: "Identified Threat".to_string(),
+                med_risk_min: 3,
+                med_risk_max: 6,
+                report_tx: r,
+            }
+        };
+        let opt = get_opt(cancel_tx.clone(), event_tx.clone(), report_tx.clone());
         let _detached = task::spawn(async {
             let m = Manager::new(opt).unwrap();
             _ = m.listen(1).await;
@@ -448,7 +463,7 @@ mod test {
         evt.id = "4".to_string();
         event_tx.send(evt.clone()).unwrap();
         evt.id = "5".to_string();
-        event_tx.send(evt).unwrap();
+        event_tx.send(evt.clone()).unwrap();
         sleep(Duration::from_millis(3000)).await;
         assert!(logs_contain("cleaning deleted backlog"));
 
@@ -456,9 +471,28 @@ mod test {
         sleep(Duration::from_millis(500)).await;
         assert!(logs_contain("report received"));
 
-        // cancel signal
+        // create another backlog
+        evt.plugin_sid = 1;
+        evt.id = "6".to_string();
+        evt.timestamp = chrono::Utc::now();
+        event_tx.send(evt.clone()).unwrap();
+        sleep(Duration::from_millis(500)).await;
+        assert!(logs_contain("creating new backlog"));
+        sleep(Duration::from_millis(500)).await;
+
+        // cancel signal, should also trigger saving to disk
         _ = cancel_tx.send(());
-        sleep(Duration::from_millis(3500)).await;
+        sleep(Duration::from_millis(4000)).await;
+        assert!(logs_contain("backlogs saved"));
         assert!(logs_contain("backlog manager exiting"));
+
+        // test loading from disk
+        let opt = get_opt(cancel_tx.clone(), event_tx.clone(), report_tx.clone());
+        let _detached = task::spawn(async {
+            let m = Manager::new(opt).unwrap();
+            _ = m.listen(1).await;
+        });
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("reloading old backlog"));
     }
 }
