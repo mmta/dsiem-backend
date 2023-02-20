@@ -111,11 +111,11 @@ mod test {
         _ = resptime_tx.send(Duration::from_millis(25)).await;
         sleep(Duration::from_millis(2000)).await;
         assert!(logs_contain("avg_proc_time_ms=75.0"));
-        for _ in 0..30000 {
+        for _ in 0..100000 {
             _ = event_tx.send(NormalizedEvent::default());
         }
         _ = resptime_tx.send(Duration::from_millis(10000)).await;
-        sleep(Duration::from_millis(3000)).await;
+        sleep(Duration::from_millis(1000)).await;
         assert!(logs_contain("processing time maybe too long"));
 
         let rpt = ManagerReport {
