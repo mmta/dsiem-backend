@@ -356,16 +356,12 @@ mod test {
         let get_opt = move |
             c: Sender<()>,
             e: Sender<NormalizedEvent>,
-            r: mpsc::Sender<ManagerReport>
+            r: mpsc::Sender<ManagerReport>,
+            directives: Vec<Directive>
         | {
             let (backpressure_tx, _) = mpsc::channel::<()>(8);
             let (resptime_tx, _) = mpsc::channel::<Duration>(128);
-            let directives = directive
-                ::load_directives(
-                    true,
-                    Some(vec!["directives".to_string(), "directive5".to_string()])
-                )
-                .unwrap();
+
             let assets = Arc::new(
                 NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap()
             );
@@ -396,11 +392,16 @@ mod test {
                 report_tx: r,
             }
         };
-        let opt = get_opt(cancel_tx.clone(), event_tx.clone(), report_tx.clone());
-        let _detached = task::spawn(async {
-            let m = Manager::new(opt).unwrap();
-            _ = m.listen(1).await;
-        });
+
+        let run_manager = |directives: Vec<Directive>| {
+            let opt = get_opt(cancel_tx.clone(), event_tx.clone(), report_tx.clone(), directives);
+            task::spawn(async {
+                let m = Manager::new(opt).unwrap();
+                _ = m.listen(1).await;
+            })
+        };
+
+        _ = run_manager(directives.clone());
 
         let _report_receiver = task::spawn(async move {
             let res = report_rx.recv().await;
@@ -447,7 +448,7 @@ mod test {
         evt.plugin_sid = 1;
         evt.id = "1".to_string();
         event_tx.send(evt.clone()).unwrap();
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(1000)).await;
         assert!(logs_contain("creating new backlog"));
 
         // matched event 2
@@ -483,16 +484,40 @@ mod test {
         // cancel signal, should also trigger saving to disk
         _ = cancel_tx.send(());
         sleep(Duration::from_millis(4000)).await;
-        assert!(logs_contain("backlogs saved"));
+        assert!(logs_contain("1 backlogs saved"));
         assert!(logs_contain("backlog manager exiting"));
 
-        // test loading from disk
-        let opt = get_opt(cancel_tx.clone(), event_tx.clone(), report_tx.clone());
-        let _detached = task::spawn(async {
-            let m = Manager::new(opt).unwrap();
-            _ = m.listen(1).await;
-        });
+        // successful loading from disk
+        _ = run_manager(directives.clone());
         sleep(Duration::from_millis(1000)).await;
         assert!(logs_contain("reloading old backlog"));
+
+        /* uncomment this block if directive rules are applied to backlog, which for now isn't
+        
+        // get to stage 4
+        for id in 7..10 {
+            evt.id = id.to_string();
+            evt.timestamp = chrono::Utc::now();
+            event_tx.send(evt.clone()).unwrap();
+            sleep(Duration::from_millis(500)).await;
+        }
+        _ = cancel_tx.send(());
+        sleep(Duration::from_millis(4000)).await;
+        assert!(logs_contain("1 backlogs saved"));
+
+        // try reloading with updated directive that has reduced number of stages
+        let updated: Vec<Directive> = directives
+            .clone()
+            .into_iter()
+            .map(|mut d| {
+                d.rules.retain(|x| x.stage < 4);
+                d
+            })
+            .collect();
+        _ = run_manager(updated);
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("lower than backlog's current stage"));
+        
+        */
     }
 }

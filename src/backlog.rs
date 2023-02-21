@@ -255,31 +255,39 @@ impl Backlog {
     }
 
     // runable_version produces backlog that manager can start
-    pub async fn runnable_version(o: BacklogOpt<'_>, saveable: Backlog) -> Result<Self> {
+    pub async fn runnable_version(o: BacklogOpt<'_>, loaded: Backlog) -> Result<Self> {
         let mut backlog = Backlog::new(o).await?;
-        // verify that we're still the same directive
-        if backlog.title != saveable.title {
+        // verify that we're still based on the same directive
+        if backlog.title != loaded.title {
             return Err(
-                anyhow!("different title detected: '{}' vs '{}'", backlog.title, saveable.title)
+                anyhow!("different title detected: '{}' vs '{}'", backlog.title, loaded.title)
             );
         }
-        backlog.id = saveable.id;
-        backlog.title = saveable.title;
-        backlog.created_time = saveable.created_time;
-        backlog.update_time = saveable.update_time;
-        backlog.risk = saveable.risk;
-        backlog.risk_class = saveable.risk_class;
-        backlog.rules = saveable.rules.clone();
-        backlog.src_ips = saveable.src_ips;
-        backlog.dst_ips = saveable.dst_ips;
-        backlog.networks = saveable.networks;
-        backlog.custom_data = saveable.custom_data;
-        backlog.intel_hits = saveable.intel_hits;
-        backlog.vulnerabilities = saveable.vulnerabilities;
-        if let Some(v) = saveable.saved_last_srcport {
+        backlog.id = loaded.id;
+        backlog.title = loaded.title;
+        backlog.created_time = loaded.created_time;
+        backlog.update_time = loaded.update_time;
+        backlog.risk = loaded.risk;
+        backlog.risk_class = loaded.risk_class;
+        backlog.src_ips = loaded.src_ips;
+        backlog.dst_ips = loaded.dst_ips;
+        backlog.networks = loaded.networks;
+        backlog.custom_data = loaded.custom_data;
+        backlog.intel_hits = loaded.intel_hits;
+        backlog.vulnerabilities = loaded.vulnerabilities;
+
+        /* 
+        new() doesn't set rules unless initialize with an event.
+        manager doesnt supply event when calling runnable_version.
+        this means whatever rules defined in the directive config will not be applied to
+        the output of runnable_version
+        */
+        backlog.rules = loaded.rules.clone();
+
+        if let Some(v) = loaded.saved_last_srcport {
             backlog.last_srcport = RwLock::new(v);
         }
-        if let Some(v) = saveable.saved_last_dstport {
+        if let Some(v) = loaded.saved_last_dstport {
             backlog.last_dstport = RwLock::new(v);
         }
 
@@ -291,8 +299,12 @@ impl Backlog {
                 r.event_ids = Arc::new(RwLock::new(v));
             }
         }
-
-        let lowest_stage = saveable.rules
+        backlog.highest_stage = backlog.rules
+            .iter()
+            .map(|v| v.stage)
+            .max()
+            .unwrap_or_default();
+        let lowest_stage = loaded.rules
             .iter()
             .filter(|v| {
                 let r = v.status.read();
@@ -301,6 +313,17 @@ impl Backlog {
             .map(|x| x.stage)
             .min();
         if let Some(v) = lowest_stage {
+            /* uncomment this block if directive rules are applied to backlog, which for now isn't
+            if v > backlog.highest_stage {
+                let e = anyhow!(
+                    "directive highest stage ({}) is lower than backlog's current stage ({}), skipping this backlog",
+                    backlog.highest_stage,
+                    v
+                );
+                error!(backlog.id, "{}", e.to_string());
+                return Err(e);
+            }
+            */
             debug!(
                 backlog.id,
                 "loaded with current_stage: {}, highest_stage: {}",
@@ -313,44 +336,39 @@ impl Backlog {
             error!(backlog.id, "{}", e.to_string());
             return Err(e);
         }
-        backlog.highest_stage = backlog.rules
-            .iter()
-            .map(|v| v.stage)
-            .max()
-            .unwrap_or_default();
 
         Ok(backlog)
     }
 
     // saveable_version produces backlog that manager can save to disk
-    pub fn saveable_version(runnable: Arc<Backlog>) -> Self {
+    pub fn saveable_version(running: Arc<Backlog>) -> Self {
         // - status, kingdom, tag, category, created_time are empty;
         let mut backlog = Backlog {
-            id: (*runnable.id).to_string(),
-            title: (*runnable.title).to_string(),
-            status: (*runnable.status).to_string(),
-            kingdom: (*runnable.kingdom).to_string(),
-            category: (*runnable.category).to_string(),
-            tag: (*runnable.tag).to_string(),
-            created_time: (*runnable.created_time.read()).into(),
-            update_time: (*runnable.update_time.read()).into(),
-            risk: (*runnable.risk.read()).into(),
-            risk_class: (*runnable.risk_class.read()).to_string().into(),
-            rules: runnable.rules.clone(),
-            src_ips: (*runnable.src_ips.read()).clone().into(),
-            dst_ips: (*runnable.dst_ips.read()).clone().into(),
-            networks: (*runnable.networks.read()).clone().into(),
-            custom_data: (*runnable.custom_data.read()).clone().into(),
-            intel_hits: (*runnable.intel_hits.read()).clone().into(),
-            vulnerabilities: (*runnable.vulnerabilities.read()).clone().into(),
+            id: (*running.id).to_string(),
+            title: (*running.title).to_string(),
+            status: (*running.status).to_string(),
+            kingdom: (*running.kingdom).to_string(),
+            category: (*running.category).to_string(),
+            tag: (*running.tag).to_string(),
+            created_time: (*running.created_time.read()).into(),
+            update_time: (*running.update_time.read()).into(),
+            risk: (*running.risk.read()).into(),
+            risk_class: (*running.risk_class.read()).to_string().into(),
+            rules: running.rules.clone(),
+            src_ips: (*running.src_ips.read()).clone().into(),
+            dst_ips: (*running.dst_ips.read()).clone().into(),
+            networks: (*running.networks.read()).clone().into(),
+            custom_data: (*running.custom_data.read()).clone().into(),
+            intel_hits: (*running.intel_hits.read()).clone().into(),
+            vulnerabilities: (*running.vulnerabilities.read()).clone().into(),
             ..Default::default()
         };
 
-        let r = runnable.last_dstport.read();
+        let r = running.last_dstport.read();
         if *r != 0 {
             backlog.saved_last_dstport = Some(*r);
         }
-        let r = runnable.last_srcport.read();
+        let r = running.last_srcport.read();
         if *r != 0 {
             backlog.saved_last_srcport = Some(*r);
         }
