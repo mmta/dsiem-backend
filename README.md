@@ -50,7 +50,11 @@ A couple of notes on this feature:
 - A saved backlog that has a different title than the directive will be discarded. This is to prevent manager from loading a wrong backlog for a directive, 
   which could happen if there's a change in directive ID assignment during down time.
 
-- All `/logs/backlogs/{directive_id}.json` files will be deleted on the next run regardless if the backlogs therein were successfully loaded or not. This is to prevent
+- Backlogs loaded from disk will continue to use their previous rules, so any changes made to the directive rules during down time will only apply to new backlogs.
+  Modify `/logs/backlogs/{directive_id}.json` during down time if there is a need to immediately apply updated rules to saved backlogs on next run, 
+  or just delete the file to discard all saved backlogs.
+
+- All `/logs/backlogs/{directive_id}.json` files will be deleted on the next run regardless of whether the backlogs therein were successfully loaded or not. This is to prevent
   potential content error affecting the backend startup process.
 
-- Saving is activated upon receiving `SIGTERM` signal. That includes commands like `docker restart` and `kill {PID}`, but not `kill -9 {PID}`.
+- Saving is activated upon receiving `SIGTERM` signal. That includes commands like `docker restart` and `kill {PID}`. By contrast, `kill -9 {PID}` or any similar command which sends `SIGKILL` instead of `SIGTERM`, will not activate saving backlogs to disk.
