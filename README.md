@@ -43,7 +43,7 @@ Compared to Dsiem in the main repo, this binary currently:
 
 ## Saving and reloading backlogs on restart
 
-If `--reload-backlogs` flag or `DSIEM_RELOAD_BACKLOG` environment variable is set to `true` (which is the default), then existing backlogs 
+If `--reload-backlogs` flag or `DSIEM_RELOAD_BACKLOGS` environment variable is set to `true` (which is the default), then existing backlogs 
 will be saved to `/logs/backlogs/{directive_id}.json` when dsiem-backend shuts down, and will be reloaded on the next run. The goal of this feature is
 to reduce the number of alarms that are recreated during configuration changes (directives, assets, etc.).
 
