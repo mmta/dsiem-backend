@@ -33,6 +33,8 @@ Compared to Dsiem in the main repo, this binary currently:
 
 - Support saving backlogs to disk before exiting, and reloading them after restart (controlled by `--reload-backlogs` flag, see below for more details).
 - Has no support for Elastic APM.
+- Requires all directives to be loaded without error during startup. The behaviour of the main repo binary which tries to fix minor errors,
+  and skip loading (with a warning) directives that has major errors, is only practical during initial migration from OSSIM.
 - Doesn't default to use JSON-lines log output (enable through `-j` parameter or `DSIEM_JSON=true` env. variable).
 - Integrate `backlog` and `alarm` to one struct to reduce data duplication.
 - More simplified use of channels (with the assistance from async), particularly for backpressure control, backlog deletion, and stats reporting.
