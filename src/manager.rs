@@ -1,4 +1,4 @@
-use std::{ sync::Arc, time::Duration };
+use std::{ sync::Arc, time::Duration, fs::create_dir_all };
 
 use tracing::{ info, debug, error };
 
@@ -10,13 +10,16 @@ use crate::{
     backlog::{ self, Backlog, BacklogState },
     intel::IntelPlugin,
     vuln::VulnPlugin,
+    utils,
 };
 
 use anyhow::{ Result, anyhow };
 use tokio::{
     task::{ JoinSet, self },
     sync::{ broadcast, mpsc, RwLock },
-    time::{ interval, timeout },
+    time::{ interval, timeout, sleep },
+    fs::{ OpenOptions, read_to_string, self },
+    io::{ AsyncWriteExt, self },
 };
 
 #[derive(PartialEq, Eq, Hash)]
@@ -27,6 +30,7 @@ pub struct ManagerReport {
 
 pub struct ManagerOpt {
     pub test_env: bool,
+    pub reload_backlogs: bool,
     pub directives: Vec<Directive>,
     pub assets: Arc<NetworkAssets>,
     pub intels: Arc<IntelPlugin>,
@@ -54,6 +58,42 @@ impl Manager {
             option,
         };
         Ok(m)
+    }
+
+    pub async fn load(test_env: bool, directive_id: u64) -> Result<Vec<Backlog>> {
+        let backlog_dir = utils::log_dir(test_env)?.join("backlogs");
+        let filename = backlog_dir.join(directive_id.to_string() + ".json");
+        debug!("loading {} (if it exist)", filename.to_string_lossy());
+        let s = read_to_string(filename.clone()).await?;
+        // always remove the file if it exist, there could be content error in it
+        _ = fs::remove_file(filename).await;
+        let backlogs: Vec<Backlog> = serde_json::from_str(&s)?;
+        Ok(backlogs)
+    }
+
+    pub async fn save(test_env: bool, directive_id: u64, source: Vec<Arc<Backlog>>) -> Result<()> {
+        let backlog_dir = utils::log_dir(test_env)?.join("backlogs");
+        create_dir_all(&backlog_dir)?;
+        let filename = directive_id.to_string() + ".json";
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(backlog_dir.join(filename)).await?;
+
+        let mut backlogs = vec![];
+        for b in source.into_iter() {
+            let saveable = Backlog::saveable_version(b);
+
+            // if extra sanity check for occurrence & stage are needed, they should be done here
+            // currently such tests are only during loading in Backlog::runable_version()
+
+            backlogs.push(saveable);
+        }
+
+        let s = serde_json::to_string_pretty(&backlogs)? + "\n";
+        file.write_all(s.as_bytes()).await?;
+        file.flush().await?;
+        Ok(())
     }
     pub async fn listen(self, report_interval: u64) -> Result<()> {
         info!("backlog manager started");
@@ -84,7 +124,6 @@ impl Manager {
                 let (sid_pairs, taxo_pairs) = rule::get_quick_check_pairs(&directive.rules);
                 let contains_pluginrule = !sid_pairs.is_empty();
                 let contains_taxorule = !taxo_pairs.is_empty();
-                let locked_backlogs: RwLock<Vec<Arc<Backlog>>> = RwLock::new(vec![]);
                 let mut upstream = sender.subscribe();
                 let mut cancel_rx = cancel_tx.subscribe();
                 let (downstream_tx, _) = broadcast::channel(1024);
@@ -94,7 +133,90 @@ impl Manager {
                 let report_sender = report_sender.clone();
                 let mut report = interval(Duration::from_secs(report_interval));
                 let mut prev_length = 0;
-                // initial
+
+                let get_opt = || {
+                    backlog::BacklogOpt {
+                        asset: assets.clone(),
+                        bp_tx: bp_sender.clone(),
+                        delete_tx: mgr_delete_tx.clone(),
+                        intels: intels.clone(),
+                        vulns: vulns.clone(),
+                        min_alarm_lifetime: self.option.min_alarm_lifetime,
+                        default_status: default_status.clone(),
+                        default_tag: default_tag.clone(),
+                        med_risk_min: self.option.med_risk_min,
+                        med_risk_max: self.option.med_risk_max,
+                        intel_private_ip: self.option.intel_private_ip,
+                        directive: &directive,
+                        event: None,
+                    }
+                };
+
+                let start_backlog = |evt: Option<NormalizedEvent>, b: Arc<Backlog>| {
+                    let rx = downstream_tx.subscribe();
+                    let max_delay = self.option.max_delay;
+                    let resptime_tx = resptime_tx.clone();
+                    task::spawn(async move {
+                        if let Err(e) = b.start(rx, evt, resptime_tx, max_delay).await {
+                            error!(
+                                directive.id,
+                                b.id,
+                                "backlog exited with an error: {:?}",
+                                e.to_string()
+                            )
+                        }
+                    })
+                };
+
+                let locked_backlogs: RwLock<Vec<Arc<Backlog>>> = RwLock::new(vec![]);
+                let clean_deleted = || async {
+                    let mut backlogs = locked_backlogs.write().await;
+                    info!(directive.id, "cleaning deleted backlog");
+                    backlogs.retain(|x| {
+                        let s = x.state.read();
+                        *s == BacklogState::Created || *s == BacklogState::Running
+                    });
+                };
+
+                if self.option.reload_backlogs {
+                    let mut backlogs = locked_backlogs.write().await;
+                    let res = Manager::load(false, directive.id).await;
+                    if let Err(e) = res {
+                        for cause in e.chain() {
+                            if let Some(e) = cause.downcast_ref::<io::Error>() {
+                                if e.kind() != io::ErrorKind::NotFound {
+                                    debug!(directive.id, "cannot load backlogs: {:?}", e);
+                                }
+                            }
+                        }
+                    } else if let Ok(load_result) = res {
+                        if !load_result.is_empty() {
+                            debug!(directive.id, "reloading old backlog");
+                        }
+                        for b in load_result.into_iter() {
+                            // perform all steps in backlog::new here
+                            let id = &b.id.clone();
+                            let res = Backlog::runnable_version(get_opt(), b).await;
+                            if res.is_err() {
+                                error!(
+                                    directive.id,
+                                    id,
+                                    "cannot recreate backlog: {:?}",
+                                    res.unwrap_err()
+                                );
+                                continue;
+                            } else if let Ok(b) = res {
+                                let arced = Arc::new(b);
+                                let clone = Arc::clone(&arced);
+                                backlogs.push(arced);
+                                let _detached = start_backlog(None, clone);
+                            }
+                        }
+                    }
+                    prev_length = backlogs.len();
+                }
+
+                // initial report
                 _ = report_sender.send(ManagerReport {
                     id: directive.id,
                     active_backlogs: prev_length,
@@ -104,6 +226,22 @@ impl Manager {
                     tokio::select! {
                         _ = cancel_rx.recv() => {
                             debug!(directive.id, "cancel signal received, exiting manager thread");
+                            drop(upstream);
+                            drop(report);
+                            sleep(Duration::from_secs(3)).await; // give time for inflight event to be processed
+                            drop(mgr_delete_rx);
+                            if self.option.reload_backlogs {
+                                clean_deleted().await;
+                                let backlogs = locked_backlogs.read().await;
+                                if  backlogs.len() > 0 {
+                                    let v = &*backlogs;
+                                    if let Err(err) = Manager::save(false, directive.id, v.to_vec()).await {
+                                        error!(directive.id, "error saving backlogs: {:?}", err);
+                                    } else {
+                                        debug!(directive.id, "{} backlogs saved", backlogs.len());
+                                    }
+                                }
+                            }
                             break;
                         }
                         _ = report.tick() => {
@@ -117,14 +255,9 @@ impl Manager {
                                 }).is_ok() {
                                 prev_length = length;
                             }
-                        },                        
+                        },
                         _ = mgr_delete_rx.recv() => {
-                            let mut backlogs = locked_backlogs.write().await;
-                            info!(directive.id, "cleaning deleted backlog");
-                            backlogs.retain(|x| {
-                                let s = x.state.read();
-                                *s == BacklogState::Created || *s == BacklogState::Running
-                            });
+                            clean_deleted().await;
                         },
                         Ok(event) = upstream.recv() => {
                             debug!(directive.id, event.id, "received event");
@@ -178,43 +311,16 @@ impl Manager {
                             }
 
                             debug!(directive.id, event.id, "creating new backlog");
-                            let opt = backlog::BacklogOpt {
-                                asset: assets.clone(),
-                                bp_tx: bp_sender.clone(),
-                                delete_tx: mgr_delete_tx.clone(),
-                                intels: intels.clone(),
-                                vulns: vulns.clone(),
-                                min_alarm_lifetime: self.option.min_alarm_lifetime,
-                                default_status: default_status.clone(),
-                                default_tag: default_tag.clone(),
-                                med_risk_min: self.option.med_risk_min,
-                                med_risk_max: self.option.med_risk_max,
-                                intel_private_ip: self.option.intel_private_ip,
-                                directive: &directive,
-                                event: &event,    
-                            };
-
+                            let mut opt = get_opt();
+                            opt.event = Some(&event);
                             let res = backlog::Backlog::new(opt).await;
                             if res.is_err() {
                                 error!(directive.id, "cannot create backlog: {}", res.unwrap_err());
                             } else if let Ok(b) = res {
-                                let locked = Arc::new(b);
-                                let clone = Arc::clone(&locked);
-                                backlogs.push(locked);
-                                let rx = downstream_tx.subscribe();
-                                let max_delay = self.option.max_delay;
-                                let resptime_tx = resptime_tx.clone();
-                                let _detached = task::spawn(async move {
-                                    let w = clone;
-                                    if let Err(e) = w.start(rx, &event, resptime_tx, max_delay).await {
-                                        error!(
-                                            directive.id,
-                                            w.id,
-                                            "backlog exited with an error: {:?}",
-                                            e.to_string()
-                                        )
-                                    }
-                                });
+                                let arced = Arc::new(b);
+                                let clone = Arc::clone(&arced);
+                                backlogs.push(arced);
+                                let _detached = start_backlog(Some(event), clone);
                             }
                         }
 
@@ -234,7 +340,7 @@ mod test {
     use crate::{ directive, manager };
 
     use super::*;
-    use tokio::{ time::sleep, task };
+    use tokio::{ time::sleep, task, sync::broadcast::Sender };
     use tracing_test::traced_test;
 
     #[tokio::test]
@@ -243,42 +349,59 @@ mod test {
         let directives = directive
             ::load_directives(true, Some(vec!["directives".to_string(), "directive5".to_string()]))
             .unwrap();
-        let assets = Arc::new(NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap());
-        let intels = Arc::new(
-            crate::intel::load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap()
-        );
-        let vulns = Arc::new(
-            crate::vuln::load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap()
-        );
         let (event_tx, _) = broadcast::channel(10);
-        let (backpressure_tx, _) = mpsc::channel::<()>(8);
-        let (resptime_tx, _) = mpsc::channel::<Duration>(128);
         let (cancel_tx, _) = broadcast::channel::<()>(1);
         let (report_tx, mut report_rx) = mpsc::channel::<manager::ManagerReport>(directives.len());
-        let opt = ManagerOpt {
-            test_env: true,
-            directives,
-            assets,
-            intels,
-            vulns,
-            intel_private_ip: false,
-            max_delay: 0,
-            min_alarm_lifetime: 0,
-            backpressure_tx,
-            cancel_tx: cancel_tx.clone(),
-            resptime_tx,
-            publisher: event_tx.clone(),
-            default_status: "Open".to_string(),
-            default_tag: "Identified Threat".to_string(),
-            med_risk_min: 3,
-            med_risk_max: 6,
-            report_tx,
+
+        let get_opt = move |
+            c: Sender<()>,
+            e: Sender<NormalizedEvent>,
+            r: mpsc::Sender<ManagerReport>,
+            directives: Vec<Directive>
+        | {
+            let (backpressure_tx, _) = mpsc::channel::<()>(8);
+            let (resptime_tx, _) = mpsc::channel::<Duration>(128);
+
+            let assets = Arc::new(
+                NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap()
+            );
+            let intels = Arc::new(
+                crate::intel::load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+            );
+            let vulns = Arc::new(
+                crate::vuln::load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+            );
+            ManagerOpt {
+                test_env: true,
+                reload_backlogs: true,
+                directives,
+                assets,
+                intels,
+                vulns,
+                intel_private_ip: false,
+                max_delay: 0,
+                min_alarm_lifetime: 0,
+                backpressure_tx,
+                cancel_tx: c,
+                resptime_tx,
+                publisher: e,
+                default_status: "Open".to_string(),
+                default_tag: "Identified Threat".to_string(),
+                med_risk_min: 3,
+                med_risk_max: 6,
+                report_tx: r,
+            }
         };
 
-        let _detached = task::spawn(async {
-            let m = Manager::new(opt).unwrap();
-            _ = m.listen(1).await;
-        });
+        let run_manager = |directives: Vec<Directive>| {
+            let opt = get_opt(cancel_tx.clone(), event_tx.clone(), report_tx.clone(), directives);
+            task::spawn(async {
+                let m = Manager::new(opt).unwrap();
+                _ = m.listen(1).await;
+            })
+        };
+
+        _ = run_manager(directives.clone());
 
         let _report_receiver = task::spawn(async move {
             let res = report_rx.recv().await;
@@ -325,7 +448,7 @@ mod test {
         evt.plugin_sid = 1;
         evt.id = "1".to_string();
         event_tx.send(evt.clone()).unwrap();
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(1000)).await;
         assert!(logs_contain("creating new backlog"));
 
         // matched event 2
@@ -341,7 +464,7 @@ mod test {
         evt.id = "4".to_string();
         event_tx.send(evt.clone()).unwrap();
         evt.id = "5".to_string();
-        event_tx.send(evt).unwrap();
+        event_tx.send(evt.clone()).unwrap();
         sleep(Duration::from_millis(3000)).await;
         assert!(logs_contain("cleaning deleted backlog"));
 
@@ -349,9 +472,52 @@ mod test {
         sleep(Duration::from_millis(500)).await;
         assert!(logs_contain("report received"));
 
-        // cancel signal
-        _ = cancel_tx.send(());
+        // create another backlog
+        evt.plugin_sid = 1;
+        evt.id = "6".to_string();
+        evt.timestamp = chrono::Utc::now();
+        event_tx.send(evt.clone()).unwrap();
         sleep(Duration::from_millis(500)).await;
+        assert!(logs_contain("creating new backlog"));
+        sleep(Duration::from_millis(500)).await;
+
+        // cancel signal, should also trigger saving to disk
+        _ = cancel_tx.send(());
+        sleep(Duration::from_millis(4000)).await;
+        assert!(logs_contain("1 backlogs saved"));
         assert!(logs_contain("backlog manager exiting"));
+
+        // successful loading from disk
+        _ = run_manager(directives.clone());
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("reloading old backlog"));
+
+        /* uncomment this block if directive rules are applied to backlog, which for now isn't
+        
+        // get to stage 4
+        for id in 7..10 {
+            evt.id = id.to_string();
+            evt.timestamp = chrono::Utc::now();
+            event_tx.send(evt.clone()).unwrap();
+            sleep(Duration::from_millis(500)).await;
+        }
+        _ = cancel_tx.send(());
+        sleep(Duration::from_millis(4000)).await;
+        assert!(logs_contain("1 backlogs saved"));
+
+        // try reloading with updated directive that has reduced number of stages
+        let updated: Vec<Directive> = directives
+            .clone()
+            .into_iter()
+            .map(|mut d| {
+                d.rules.retain(|x| x.stage < 4);
+                d
+            })
+            .collect();
+        _ = run_manager(updated);
+        sleep(Duration::from_millis(1000)).await;
+        assert!(logs_contain("lower than backlog's current stage"));
+        
+        */
     }
 }

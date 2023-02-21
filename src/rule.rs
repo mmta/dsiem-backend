@@ -97,10 +97,14 @@ pub struct DirectiveRule {
     #[serde(skip_serializing_if = "String::is_empty")]
     #[serde(default)]
     pub custom_label3: String,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip)]
     pub sticky_diffdata: Arc<RwLock<StickyDiffData>>,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_sticky_diffdata: Option<StickyDiffData>, // saveable version of sticky_diffdata
+    #[serde(skip)]
     pub event_ids: Arc<RwLock<HashSet<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_event_ids: Option<HashSet<String>>, // saveable version of event_ids
 }
 
 // This is only used for serialize
@@ -410,7 +414,7 @@ fn is_ip_match_csvrule(rules_in_csv: &str, ip: IpAddr) -> bool {
     result
 }
 
-#[derive(Deserialize, Default, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug, PartialEq)]
 pub struct StickyDiffData {
     pub sdiff_string: Vec<String>,
     pub sdiff_int: Vec<u64>,

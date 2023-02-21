@@ -179,6 +179,14 @@ pub struct ServeArgs {
     /// Check private IP addresses against threat intel
     #[arg(long = "intel_private_ip", env = "DSIEM_INTELPRIVATEIP", default_value_t = false)]
     intel_private_ip: bool,
+    /// Save and reload running backlogs on restart
+    #[arg(
+        long = "reload-backlogs",
+        env = "DSIEM_RELOAD_BACKLOGS",
+        value_name = "boolean",
+        default_value_t = true
+    )]
+    pub reload_backlogs: bool,
 }
 
 #[tokio::main]
@@ -314,6 +322,7 @@ async fn serve(listen: bool, require_logging: bool, args: Cli) -> Result<()> {
 
     let opt = ManagerOpt {
         test_env,
+        reload_backlogs: sargs.reload_backlogs,
         directives,
         assets,
         intels,
@@ -388,6 +397,7 @@ mod test {
         assert!(!sargs.intel_private_ip);
         assert!(sargs.tags.iter().any(|x| x == "Valid Threat"));
         assert!(sargs.status.iter().any(|x| x == "Open"));
+        assert!(sargs.reload_backlogs);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]

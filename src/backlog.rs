@@ -31,7 +31,7 @@ use anyhow::{ Result, Context, anyhow };
 const ALARM_EVENT_LOG: &str = "siem_alarm_events.json";
 const ALARM_LOG: &str = "siem_alarms.json";
 
-#[derive(Serialize, Deserialize, Debug, Hash, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Hash, PartialEq, Eq)]
 pub struct CustomData {
     pub label: String,
     pub content: String,
@@ -54,9 +54,9 @@ pub enum BacklogState {
 }
 
 // serialize should only for alarm fields
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Backlog {
-    #[serde(rename(serialize = "alarm_id"))]
+    #[serde(rename(serialize = "alarm_id", deserialize = "alarm_id"))]
     pub id: String,
     pub title: String,
     pub status: String,
@@ -72,50 +72,59 @@ pub struct Backlog {
     pub dst_ips: RwLock<HashSet<IpAddr>>,
     pub networks: RwLock<HashSet<String>>,
     #[serde(skip_serializing_if = "is_locked_data_empty")]
+    #[serde(default)]
     pub intel_hits: RwLock<HashSet<IntelResult>>,
     #[serde(skip_serializing_if = "is_locked_data_empty")]
+    #[serde(default)]
     pub vulnerabilities: RwLock<HashSet<VulnResult>>,
     #[serde(skip_serializing_if = "is_locked_data_empty")]
+    #[serde(default)]
     pub custom_data: RwLock<HashSet<CustomData>>,
-    #[serde(skip_serializing)]
-    pub current_stage: RwLock<u8>,
-    #[serde(skip_serializing)]
-    pub highest_stage: u8,
-    #[serde(skip_serializing)]
+
+    #[serde(skip)]
     pub last_srcport: RwLock<u16>, // copied from event for vuln check
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_last_srcport: Option<u16>, // saveable version of last_srcport
+    #[serde(skip)]
     pub last_dstport: RwLock<u16>, // copied from event for vuln check
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_last_dstport: Option<u16>, // saveable version of last_dstport
+
+    #[serde(skip)]
     pub all_rules_always_active: bool, // copied from directive
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub priority: u8, // copied from directive
-    #[serde(skip_serializing)]
+    #[serde(skip)]
+    pub current_stage: RwLock<u8>,
+    #[serde(skip)]
+    pub highest_stage: u8,
+    #[serde(skip)]
     pub assets: Arc<NetworkAssets>,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     alarm_events_writer: TokioRwLock<Option<File>>,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     alarm_writer: TokioRwLock<Option<File>>,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     backpressure_tx: Option<Sender<()>>,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     delete_channel: DeleteChannel,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub found_channel: FoundChannel,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub state: RwLock<BacklogState>,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub min_alarm_lifetime: i64,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub med_risk_min: u8,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub med_risk_max: u8,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub intels: Option<Arc<IntelPlugin>>,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub vulns: Option<Arc<VulnPlugin>>,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub intel_private_ip: bool,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     metrics: Metrics,
 }
 
@@ -171,7 +180,7 @@ pub struct BacklogOpt<'a> {
     pub asset: Arc<NetworkAssets>,
     pub intels: Arc<IntelPlugin>,
     pub vulns: Arc<VulnPlugin>,
-    pub event: &'a NormalizedEvent,
+    pub event: Option<&'a NormalizedEvent>,
     pub bp_tx: Sender<()>,
     pub delete_tx: Sender<()>,
     pub min_alarm_lifetime: i64,
@@ -193,10 +202,6 @@ impl Backlog {
             status: o.default_status,
             tag: o.default_tag,
             intel_private_ip: o.intel_private_ip,
-
-            rules: o.directive
-                .init_backlog_rules(o.event)
-                .context("cannot initialize backlog rule")?,
             current_stage: RwLock::new(1),
             priority: o.directive.priority,
             all_rules_always_active: o.directive.all_rules_always_active,
@@ -210,13 +215,18 @@ impl Backlog {
             state: RwLock::new(BacklogState::Created),
             ..Default::default()
         };
+        if let Some(v) = o.event {
+            backlog.rules = o.directive
+                .init_backlog_rules(v)
+                .context("cannot initialize backlog rule")?;
+            backlog.highest_stage = backlog.rules
+                .iter()
+                .map(|v| v.stage)
+                .max()
+                .unwrap_or_default();
+        }
         backlog.delete_channel.to_upstream_manager = Some(o.delete_tx);
 
-        backlog.highest_stage = backlog.rules
-            .iter()
-            .map(|v| v.stage)
-            .max()
-            .unwrap_or_default();
         let log_dir = utils::log_dir(false).unwrap();
         fs::create_dir_all(&log_dir).await?;
         let file = OpenOptions::new()
@@ -233,13 +243,149 @@ impl Backlog {
         backlog.intels = Some(o.intels);
         backlog.vulns = Some(o.vulns);
 
-        info!(
-            directive_id = o.directive.id,
-            backlog.id,
-            event_id = o.event.id,
-            "new backlog created"
-        );
+        if let Some(v) = o.event {
+            info!(
+                directive_id = o.directive.id,
+                backlog.id,
+                event_id = v.id,
+                "new backlog created"
+            );
+        }
         Ok(backlog)
+    }
+
+    // runable_version produces backlog that manager can start
+    pub async fn runnable_version(o: BacklogOpt<'_>, loaded: Backlog) -> Result<Self> {
+        let mut backlog = Backlog::new(o).await?;
+        // verify that we're still based on the same directive
+        if backlog.title != loaded.title {
+            return Err(
+                anyhow!("different title detected: '{}' vs '{}'", backlog.title, loaded.title)
+            );
+        }
+        backlog.id = loaded.id;
+        backlog.title = loaded.title;
+        backlog.created_time = loaded.created_time;
+        backlog.update_time = loaded.update_time;
+        backlog.risk = loaded.risk;
+        backlog.risk_class = loaded.risk_class;
+        backlog.src_ips = loaded.src_ips;
+        backlog.dst_ips = loaded.dst_ips;
+        backlog.networks = loaded.networks;
+        backlog.custom_data = loaded.custom_data;
+        backlog.intel_hits = loaded.intel_hits;
+        backlog.vulnerabilities = loaded.vulnerabilities;
+
+        /* 
+        new() doesn't set rules unless initialize with an event.
+        manager doesnt supply event when calling runnable_version.
+        this means whatever rules defined in the directive config will not be applied to
+        the output of runnable_version
+        */
+        backlog.rules = loaded.rules.clone();
+
+        if let Some(v) = loaded.saved_last_srcport {
+            backlog.last_srcport = RwLock::new(v);
+        }
+        if let Some(v) = loaded.saved_last_dstport {
+            backlog.last_dstport = RwLock::new(v);
+        }
+
+        for mut r in backlog.rules.iter_mut() {
+            if let Some(v) = r.saved_sticky_diffdata.clone() {
+                r.sticky_diffdata = Arc::new(RwLock::new(v));
+            }
+            if let Some(v) = r.saved_event_ids.clone() {
+                r.event_ids = Arc::new(RwLock::new(v));
+            }
+        }
+        backlog.highest_stage = backlog.rules
+            .iter()
+            .map(|v| v.stage)
+            .max()
+            .unwrap_or_default();
+        let lowest_stage = loaded.rules
+            .iter()
+            .filter(|v| {
+                let r = v.status.read();
+                r.is_empty()
+            })
+            .map(|x| x.stage)
+            .min();
+        if let Some(v) = lowest_stage {
+            /* uncomment this block if directive rules are applied to backlog, which for now isn't
+            if v > backlog.highest_stage {
+                let e = anyhow!(
+                    "directive highest stage ({}) is lower than backlog's current stage ({}), skipping this backlog",
+                    backlog.highest_stage,
+                    v
+                );
+                error!(backlog.id, "{}", e.to_string());
+                return Err(e);
+            }
+            */
+            debug!(
+                backlog.id,
+                "loaded with current_stage: {}, highest_stage: {}",
+                v,
+                backlog.highest_stage
+            );
+            backlog.current_stage = RwLock::new(v);
+        } else {
+            let e = anyhow!("cannot determine the current stage, skipping this backlog");
+            error!(backlog.id, "{}", e.to_string());
+            return Err(e);
+        }
+
+        Ok(backlog)
+    }
+
+    // saveable_version produces backlog that manager can save to disk
+    pub fn saveable_version(running: Arc<Backlog>) -> Self {
+        // - status, kingdom, tag, category, created_time are empty;
+        let mut backlog = Backlog {
+            id: (*running.id).to_string(),
+            title: (*running.title).to_string(),
+            status: (*running.status).to_string(),
+            kingdom: (*running.kingdom).to_string(),
+            category: (*running.category).to_string(),
+            tag: (*running.tag).to_string(),
+            created_time: (*running.created_time.read()).into(),
+            update_time: (*running.update_time.read()).into(),
+            risk: (*running.risk.read()).into(),
+            risk_class: (*running.risk_class.read()).to_string().into(),
+            rules: running.rules.clone(),
+            src_ips: (*running.src_ips.read()).clone().into(),
+            dst_ips: (*running.dst_ips.read()).clone().into(),
+            networks: (*running.networks.read()).clone().into(),
+            custom_data: (*running.custom_data.read()).clone().into(),
+            intel_hits: (*running.intel_hits.read()).clone().into(),
+            vulnerabilities: (*running.vulnerabilities.read()).clone().into(),
+            ..Default::default()
+        };
+
+        let r = running.last_dstport.read();
+        if *r != 0 {
+            backlog.saved_last_dstport = Some(*r);
+        }
+        let r = running.last_srcport.read();
+        if *r != 0 {
+            backlog.saved_last_srcport = Some(*r);
+        }
+        for rule in backlog.rules.iter_mut() {
+            let r = rule.sticky_diffdata.read();
+            if !r.sdiff_int.is_empty() || !r.sdiff_string.is_empty() {
+                let v = (*r).clone();
+                rule.saved_sticky_diffdata = Some(v);
+            }
+            let r = rule.event_ids.read();
+            if !r.is_empty() {
+                let v = (*r).clone();
+                rule.saved_event_ids = Some(v);
+            }
+        }
+
+        backlog
     }
 
     async fn handle_expiration(&self) -> Result<()> {
@@ -251,11 +397,13 @@ impl Backlog {
     pub async fn start(
         &self,
         mut rx: Receiver<NormalizedEvent>,
-        initial_event: &NormalizedEvent,
+        initial_event: Option<NormalizedEvent>,
         resptime_tx: Sender<Duration>,
         max_delay: i64
     ) -> Result<()> {
-        self.process_new_event(initial_event, max_delay).await?;
+        if let Some(v) = initial_event {
+            self.process_new_event(&v, max_delay).await?;
+        }
         let mut expiration_checker = interval(Duration::from_secs(10));
         let mut delete_rx = self.delete_channel.rx.clone();
         debug!(self.id, "enter running state");
@@ -562,8 +710,6 @@ impl Backlog {
             self.set_rule_starttime(event.timestamp)?;
             // stageIncreased, update alarm to publish new stage startTime
             self.update_alarm(true).await?;
-        } else {
-            error!(self.id, event.id, "stage not increased");
         }
 
         Ok(())
@@ -593,19 +739,17 @@ impl Backlog {
     ) -> Result<()> {
         let target_rule = self.get_rule(stage)?;
         {
-            let ttl_events = target_rule.event_ids.read().len();
+            let mut w = target_rule.event_ids.write();
+            w.insert(event.id.clone());
+            let ttl_events = w.len();
             debug!(
                 self.id,
                 event.id,
                 target_rule.stage,
-                "appending event {}/{}",
+                "appended event {}/{}",
                 ttl_events,
                 target_rule.occurrence
             );
-        }
-        {
-            let mut w = target_rule.event_ids.write();
-            w.insert(event.id.clone());
         }
 
         const DEFAULT_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
@@ -854,7 +998,7 @@ impl VulnSearchTerm {
 
 #[cfg(test)]
 mod test {
-    use crate::directive;
+    use crate::{ directive, rule::StickyDiffData };
 
     use super::*;
     use chrono::Days;
@@ -873,6 +1017,109 @@ mod test {
         assert!(vs.terms.len() == 2);
         vs.add(ipset, ports, evt_port);
         assert!(vs.terms.len() == 2);
+    }
+
+    #[tokio::test]
+    async fn test_saved_reload() {
+        let directives = directive
+            ::load_directives(true, Some(vec!["directives".to_string(), "directive5".to_string()]))
+            .unwrap();
+        let d = directives[0].clone();
+        let evt = NormalizedEvent {
+            plugin_id: 1337,
+            plugin_sid: 1,
+            id: "1".to_string(),
+            src_ip: "192.168.0.1".parse().unwrap(),
+            dst_ip: "10.0.0.131".parse().unwrap(),
+            ..Default::default()
+        };
+        let get_opt = || {
+            let asset = Arc::new(
+                NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap()
+            );
+            let intels = Arc::new(
+                crate::intel::load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+            );
+            let vulns = Arc::new(
+                crate::vuln::load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap()
+            );
+            let (mgr_delete_tx, _) = mpsc::channel::<()>(128);
+            let (bp_tx, _) = mpsc::channel::<()>(1);
+
+            BacklogOpt {
+                directive: &d,
+                asset,
+                intels,
+                vulns,
+                event: Some(&evt),
+                bp_tx,
+                delete_tx: mgr_delete_tx,
+                min_alarm_lifetime: 0,
+                default_status: "Open".to_string(),
+                default_tag: "Identified Threat".to_string(),
+                med_risk_min: 3,
+                med_risk_max: 6,
+                intel_private_ip: true,
+            }
+        };
+
+        let mut event_ids = HashSet::new();
+        event_ids.insert("bar".to_string());
+
+        let mut stickydiff_data = StickyDiffData::default();
+        stickydiff_data.sdiff_int.push(10);
+        stickydiff_data.sdiff_string.push("foo".to_string());
+
+        let last_srcport = 31337;
+        let last_dstport = 80;
+
+        let mut b = Backlog::new(get_opt()).await.unwrap();
+        {
+            let mut w = b.last_srcport.write();
+            *w = last_srcport;
+            let mut w = b.last_dstport.write();
+            *w = last_dstport;
+            for rule in b.rules.iter_mut() {
+                let mut w = rule.sticky_diffdata.write();
+                *w = stickydiff_data.clone();
+                let mut w = rule.event_ids.write();
+                *w = event_ids.clone();
+            }
+        }
+
+        // saveable test
+        let saveable = Backlog::saveable_version(Arc::new(b));
+        assert_eq!(saveable.saved_last_dstport, Some(last_dstport));
+        assert_eq!(saveable.saved_last_srcport, Some(last_srcport));
+        for rule in saveable.rules.iter() {
+            assert_eq!(rule.saved_event_ids, Some(event_ids.clone()));
+            assert_eq!(rule.saved_sticky_diffdata, Some(stickydiff_data.clone()));
+        }
+
+        // runable test, reverses saveable
+        let runnable = Backlog::runnable_version(get_opt(), saveable).await.unwrap();
+        assert_eq!(*runnable.last_srcport.read(), last_srcport);
+        assert_eq!(*runnable.last_dstport.read(), last_dstport);
+        for rule in runnable.rules.iter() {
+            assert_eq!(*rule.event_ids.read(), event_ids);
+            assert_eq!(*rule.sticky_diffdata.read(), stickydiff_data);
+        }
+
+        // should throw error if the saved backlog and the directive have the same ID but different title
+        let b = Backlog::new(get_opt()).await.unwrap();
+        let mut saveable = Backlog::saveable_version(Arc::new(b));
+        saveable.title = "foo".to_string();
+        let res = Backlog::runnable_version(get_opt(), saveable).await;
+        assert!(res.unwrap_err().to_string().contains("different title detected"));
+
+        // should throw error if all rules in the saved backlog already have a status (i.e. finished or timeout)
+        let b = Backlog::new(get_opt()).await.unwrap();
+        let mut saveable = Backlog::saveable_version(Arc::new(b));
+        for rule in saveable.rules.iter_mut() {
+            rule.status = Arc::new(RwLock::new("finished".to_string()));
+        }
+        let res = Backlog::runnable_version(get_opt(), saveable).await;
+        assert!(res.unwrap_err().to_string().contains("skipping this backlog"));
     }
 
     #[tokio::test]
@@ -920,7 +1167,7 @@ mod test {
             asset,
             intels,
             vulns,
-            event: &evt_cloned,
+            event: Some(&evt_cloned),
             bp_tx,
             delete_tx: mgr_delete_tx,
             default_status: "Open".to_string(),
@@ -933,7 +1180,7 @@ mod test {
         let backlog = Backlog::new(opt).await.unwrap();
         debug!("backlog: {:?}", backlog);
         let _detached = task::spawn(async move {
-            _ = backlog.start(event_rx, &evt_cloned, resptime_tx, 1).await;
+            _ = backlog.start(event_rx, Some(evt_cloned), resptime_tx, 1).await;
         });
 
         // these matching event should increase level from 2 to 3 to 4, and raise risk
@@ -974,12 +1221,19 @@ mod test {
             .unwrap();
         let d = directives[0].clone();
         let asset = Arc::new(NetworkAssets::new(true, Some(vec!["assets".to_string()])).unwrap());
-        let intels = Arc::new(
-            crate::intel::load_intel(true, Some(vec!["intel_vuln".to_string()])).unwrap()
-        );
-        let vulns = Arc::new(
-            crate::vuln::load_vuln(true, Some(vec!["intel_vuln".to_string()])).unwrap()
-        );
+
+        let mut intel_plugin = crate::intel
+            ::load_intel(true, Some(vec!["intel_vuln".to_string()]))
+            .unwrap();
+        intel_plugin.checkers = Arc::new(vec![]); // disable, we're not testing this
+        let intels = Arc::new(intel_plugin);
+
+        let mut vuln_plugin = crate::vuln
+            ::load_vuln(true, Some(vec!["intel_vuln".to_string()]))
+            .unwrap();
+        vuln_plugin.checkers = Arc::new(vec![]); // disable, we're not testing this
+        let vulns = Arc::new(vuln_plugin);
+
         let (mgr_delete_tx, _) = mpsc::channel::<()>(128);
         let (event_tx, event_rx) = broadcast::channel(10);
         let (bp_tx, _) = mpsc::channel::<()>(1);
@@ -1002,7 +1256,7 @@ mod test {
             asset,
             intels,
             vulns,
-            event: &evt_cloned,
+            event: Some(&evt_cloned),
             bp_tx,
             delete_tx: mgr_delete_tx,
             default_status: "Open".to_string(),
@@ -1014,7 +1268,7 @@ mod test {
         };
         let backlog = Backlog::new(opt).await.unwrap();
         let _detached = task::spawn(async move {
-            _ = backlog.start(event_rx, &evt_cloned, resptime_tx, 1).await;
+            _ = backlog.start(event_rx, Some(evt_cloned), resptime_tx, 1).await;
         });
 
         evt.id = "2".to_string();
@@ -1057,8 +1311,8 @@ mod test {
         evt.id = "8".to_string();
         event_tx.send(evt.clone()).unwrap();
         evt.id = "9".to_string();
-        event_tx.send(evt.clone()).unwrap();
-        sleep(Duration::from_millis(1000)).await;
+        event_tx.send(evt).unwrap();
+        sleep(Duration::from_millis(2000)).await;
         assert!(logs_contain("risk changed from 1 to 6"));
     }
 
@@ -1095,7 +1349,7 @@ mod test {
                 asset,
                 intels,
                 vulns,
-                event: &evt,
+                event: Some(&evt),
                 bp_tx,
                 delete_tx: mgr_delete_tx,
                 default_status: "Open".to_string(),
@@ -1106,7 +1360,7 @@ mod test {
                 intel_private_ip: false,
             };
             let backlog = Backlog::new(opt).await.unwrap();
-            _ = backlog.start(event_rx, &evt, resptime_tx, 0).await;
+            _ = backlog.start(event_rx, Some(evt), resptime_tx, 0).await;
         });
 
         // expired
