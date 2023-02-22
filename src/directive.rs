@@ -4,7 +4,7 @@ use regex::Regex;
 use serde_derive::Deserialize;
 extern crate glob;
 use glob::glob;
-use tracing::info;
+use tracing::{ info, warn };
 use anyhow::{ Result, anyhow };
 
 use crate::{
@@ -304,6 +304,10 @@ pub fn load_directives(test_env: bool, sub_path: Option<Vec<String>>) -> Result<
         let s = fs::read_to_string(file_path)?;
         let loaded: Directives = serde_json::from_str(&s)?;
         for d in loaded.directives {
+            if d.disabled {
+                warn!(d.id, "skipping disabled directive");
+                continue;
+            }
             validate_directive(&d, &dirs.directives)?;
             dirs.directives.push(d);
         }
@@ -337,11 +341,10 @@ mod test {
             let res = load_directives(true, Some(dir.clone()));
             println!("directory is: {:?}", dir.clone());
 
-            if let Ok(v) = res {
-                // only for 28
-                assert!(v.first().unwrap().disabled);
-            } else {
-                let s = res.unwrap_err().to_string();
+            if res.is_ok() {
+                panic!("all test should results in err");
+            } else if let Err(e) = res {
+                let s = e.to_string();
                 match n {
                     1 => assert!(s.contains("missing field `rules`")),
                     2 => assert!(s.contains("kingdom is empty")),
@@ -369,7 +372,7 @@ mod test {
                     24 => assert!(s.contains("first rule cannot have reference")),
                     25 => assert!(s.contains("is not a valid reference")),
                     26 => assert!(s.contains("is not a valid reference")),
-                    _ => assert!(s.contains("cannot load any directive")),
+                    _ => assert!(s.contains("cannot load any directive")), // for 27 and 28
                 }
             }
         }
@@ -377,7 +380,7 @@ mod test {
 
     #[test]
     fn test_init_backlog_rules() {
-        let dir_path = vec!["directives".to_owned(), "directive2".to_owned(), "28".to_owned()];
+        let dir_path = vec!["directives".to_owned(), "directive3".to_owned()];
         let o = load_directives(true, Some(dir_path)).unwrap();
         let d = o.first().unwrap();
         let e = NormalizedEvent {

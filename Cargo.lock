@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "dsiem-backend"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "async-nats",

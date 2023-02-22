@@ -4,7 +4,7 @@
       "name": "Empty directive category",
       "kingdom": "Reconnaissance & Probing",
       "category": "",
-      "disabled": true,
+      "disabled": false,
       "id": 2,
       "priority": 5,
       "rules": [
