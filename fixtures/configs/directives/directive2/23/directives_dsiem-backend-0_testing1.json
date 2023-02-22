@@ -4,7 +4,7 @@
       "name": "First rule have reference in from",
       "kingdom": "Reconnaissance & Probing",
       "category": "Misc Activity",
-      "disabled": true,
+      "disabled": false,
       "id": 2,
       "priority": 5,
       "rules": [

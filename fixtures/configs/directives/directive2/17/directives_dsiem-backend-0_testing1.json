@@ -4,7 +4,7 @@
       "name": "Wrong occurrence for stage 1",
       "kingdom": "Reconnaissance & Probing",
       "category": "Misc Activity",
-      "disabled": true,
+      "disabled": false,
       "id": 2,
       "priority": 5,
       "rules": [
