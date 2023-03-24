@@ -23,7 +23,7 @@ cidr = { version = "0.2.1", features = ["serde"] }
 tokio = { version = "1.25.0", features = ["sync"] }
 nats = "0.23.1"
 chrono = { version = "0.4.23", features = ["serde", "clock" ], default-features = false }
-async-nats = "0.27.0"
+async-nats = "0.29.0"
 reqwest = "0.11.14"
 anyhow = "1.0.68"
 nanoid = "0.4.0"
