@@ -401,7 +401,7 @@ mod test {
             })
         };
 
-        _ = run_manager(directives.clone());
+        let _handle = run_manager(directives.clone());
 
         let _report_receiver = task::spawn(async move {
             let res = report_rx.recv().await;
@@ -488,7 +488,7 @@ mod test {
         assert!(logs_contain("backlog manager exiting"));
 
         // successful loading from disk
-        _ = run_manager(directives.clone());
+        let _handle = run_manager(directives.clone());
         sleep(Duration::from_millis(1000)).await;
         assert!(logs_contain("reloading old backlog"));
 

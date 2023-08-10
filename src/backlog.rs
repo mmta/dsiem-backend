@@ -291,7 +291,7 @@ impl Backlog {
             backlog.last_dstport = RwLock::new(v);
         }
 
-        for mut r in backlog.rules.iter_mut() {
+        for r in backlog.rules.iter_mut() {
             if let Some(v) = r.saved_sticky_diffdata.clone() {
                 r.sticky_diffdata = Arc::new(RwLock::new(v));
             }
