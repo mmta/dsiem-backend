@@ -21,7 +21,10 @@ jobs:
       - name: test
         timeout-minutes: 5
         run: |
-          cargo test
+          # test everything except these two, to avoid flaky log_contains result
+          cargo test -- --skip watchdog::test::test_watchdog --skip backlog::test::test_backlog
+          # test them separately here
+          cargo test -- watchdog::test::test_watchdog backlog::test::test_backlog
       - name: build-image
         run: |
           ./scripts/dockerbuild.sh
