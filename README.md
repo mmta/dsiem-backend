@@ -1,5 +1,10 @@
 # Dsiem backend
 
+>[!CAUTION]
+>This repo had been merged into [Defenxor Dsiem-rs](https://github.com/defenxor/dsiem-rs).
+>There will be no new updates or releases here; developments will continue in that repo instead.
+>
+
 [![CI](https://github.com/mmta/dsiem-backend/actions/workflows/publish.yml/badge.svg)](https://github.com/mmta/dsiem-backend/actions/workflows/publish.yml) 
 [![codecov](https://codecov.io/gh/mmta/dsiem-backend/branch/master/graph/badge.svg?token=GFF0LCZDO2)](https://codecov.io/gh/mmta/dsiem-backend)
 
